@@ -86,6 +86,13 @@ identities.
 manifests, runs ReLU, a 2x2 matmul, and xor/shift/add over `u64` values, and
 demonstrates typed rejection of invalid dimensions, shifts, and buffer sizes.
 
+`just bench` installs the release-mode reference kernels and benchmarks typed
+dispatch against in-binary native baselines: per-call dispatch overhead at
+size 1, throughput at steady-state sizes, the artifact record dispatch path,
+admission and identity costs (SHA-256 artifact identity and UOR provenance
+address), and a measured zero heap allocations across thousands of typed
+dispatches.
+
 Run `just` to see every available development command. `just ci` is the local
 release gate.
 
@@ -151,6 +158,7 @@ just build-kernels-release # build every kernel in release mode
 just test-kernels  # run every standalone kernel's unit tests
 just install-kernels # build and install every standalone kernel
 just kernel-demo  # install kernels and run the end-to-end kernel demo
+just bench        # benchmark kernel dispatch against native baselines
 just build-all    # CI plus release builds and plugin build
 just package      # build crates and package them
 just release-check

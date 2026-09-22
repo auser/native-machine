@@ -85,6 +85,27 @@ install-kernels: build-kernels
     done; \
     test "$found" -eq 1
 
+# Build and install every standalone kernel in release mode.
+install-kernels-release: build-kernels-release
+    RUSTC_WRAPPER= cargo run -p native-machine -- init
+    case "$(uname -s)" in \
+        Darwin) library_prefix=lib; library_suffix=dylib ;; \
+        MINGW*|MSYS*|CYGWIN*) library_prefix=; library_suffix=dll ;; \
+        *) library_prefix=lib; library_suffix=so ;; \
+    esac; \
+    found=0; \
+    for manifest in kernels/*/Cargo.toml; do \
+        test -f "$manifest" || continue; \
+        found=1; \
+        kernel_dir="${manifest%/Cargo.toml}"; \
+        kernel_name="${kernel_dir##*/}"; \
+        library_name="${kernel_name//-/_}"; \
+        library="$kernel_dir/target/release/${library_prefix}${library_name}.${library_suffix}"; \
+        test -f "$library" || { echo "missing compiled kernel: $library" >&2; exit 1; }; \
+        RUSTC_WRAPPER= cargo run -p native-machine -- kernel install "$library"; \
+    done; \
+    test "$found" -eq 1
+
 # Run CI, build the plugin, and produce release binaries.
 build-all: ci plugin build-kernels-release
     cargo build --workspace --release
@@ -131,6 +152,10 @@ test-kernels:
 # Build, install, and exercise every reference kernel end to end.
 kernel-demo: install-kernels
     RUSTC_WRAPPER= cargo run -p native-machine -- kernel demo
+
+# Benchmark kernel dispatch against native baselines in release mode.
+bench: install-kernels-release
+    RUSTC_WRAPPER= cargo run --release -p native-machine -- kernel bench
 
 # Create an artifact fixture at the requested path.
 artifact-create path="fixture.nm":

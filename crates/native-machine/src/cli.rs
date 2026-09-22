@@ -53,6 +53,7 @@ pub enum KernelCommand {
     Test { path: PathBuf },
     Install { path: PathBuf },
     Demo,
+    Bench,
 }
 
 #[derive(Subcommand, Debug)]

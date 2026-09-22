@@ -232,6 +232,10 @@ impl PluginRegistry {
             .ok_or_else(|| PluginError::NotFound(name.to_owned()))
     }
 
+    pub fn kernel_index(&self, name: &str) -> Option<usize> {
+        self.entries.iter().position(|entry| entry.name == name)
+    }
+
     pub fn run_f32(
         &self,
         name: &str,
@@ -1272,7 +1276,7 @@ mod tests {
         let mut c = [0.0_f32; 4];
         let words = [1_u64, 2, 3, 4];
         let mut words_output = [0_u64; 4];
-        let tracking = crate::allocation_test_support::track();
+        let tracking = crate::allocation::track();
         registry
             .run_f32("test-elementwise", &input, &mut output)
             .expect("kernel executes");

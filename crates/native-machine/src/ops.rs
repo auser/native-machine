@@ -248,7 +248,7 @@ mod tests {
         record[8..12].copy_from_slice(&2_u32.to_le_bytes());
         record[12..16].copy_from_slice(&2_u32.to_le_bytes());
         let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
-        let tracking = crate::allocation_test_support::track();
+        let tracking = crate::allocation::track();
         execute_records_with_scratch(&mut arena, &record, &mut scratch).expect("record executes");
         let allocations = tracking.count();
         drop(tracking);

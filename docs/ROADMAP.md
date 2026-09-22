@@ -46,7 +46,7 @@
 - [x] zero-allocation typed dispatch test
 - [ ] one-time scalar/NEON/AVX2/VNNI dispatch
 - [ ] SIMD differential tests
-- [ ] kernel head-to-head benchmarks
+- [x] kernel head-to-head benchmarks (`just bench`, native baseline ratios)
 
 ## Phase 5 — compiler
 

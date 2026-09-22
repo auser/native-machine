@@ -96,6 +96,17 @@ corrupt or crash the host process. Admission is therefore explicit
 (`kernel install`), verified by content hash on every load, bounded by a
 determinism probe, and limited to plugins the user deliberately supplies.
 
+## Benchmarks
+
+`just bench` installs the release-mode reference kernels and measures typed
+dispatch against in-binary native baselines in a release build. Expected
+shape: a fixed dispatch overhead (tens of nanoseconds, visible at size 1)
+that amortizes to a ratio near 1.0x at steady-state sizes, zero heap
+allocations per dispatch, and admission/identity costs (SHA-256 artifact
+identity, UOR provenance address, manifest verification) reported separately
+as one-time per-load operations. The benchmark fails if any typed dispatch
+allocates on the success path.
+
 ## UOR integration
 
 `uor-addr` supplies stable identities for manifests and operation plans. The
