@@ -28,11 +28,73 @@ kernel table once, and executes bounded operations over caller-owned state.
 
 ## Kernel plugin model
 
-The current ABI is version 2. It includes explicit input/output type IDs,
-bounded scratch requirements, and required CPU feature bits. The host resolves
-only `hologram_kernel_plugin_v2`, validates the descriptor before retaining the
-library, and rejects incompatible plugins without semantic fallback. Future ABI
-versions must use an explicit entry point and compatibility policy.
+The current ABI is version 3. The host resolves only
+`hologram_kernel_plugin_v3`, validates the descriptor before retaining the
+library, and rejects incompatible plugins — including ABI v2 plugins — without
+semantic fallback. Future ABI versions must use an explicit entry point and
+compatibility policy.
+
+The descriptor declares, in fixed-width fields: ABI version, name, input type,
+output type, operation kind, required alignment, scratch bytes, required CPU
+features, and the entry function. Type IDs are `F32 = 1` and `U64 = 2`;
+operation kinds are `ELEMENTWISE = 1`, `MATMUL = 2`, and `XOR_SHIFT_ADD = 3`.
+
+Invocation passes a bounded byte-oriented context:
+
+```text
+input: *const u8, input_bytes: u64
+output: *mut u8, output_bytes: u64
+params: *const u8, params_bytes: u64
+```
+
+No Rust slices, references, `usize`, vtables, or heap-owned structures cross
+the boundary. Parameters use fixed-width little-endian encodings: matmul takes
+three `u32` dimensions (`m`, `k`, `n`); xor-shift-add takes a `u32` shift, a
+reserved zero `u32`, and a `u64` addend.
+
+The registry exposes typed, allocation-free dispatch methods (`run_f32`,
+`run_matmul`, `run_u64`). Buffers are caller-owned and passed through without
+repacking; for matmul, `A` and `B` must form one contiguous row-major region
+so the single input pointer can cover both operands. The success path performs
+no heap allocation, verified by an allocation-counting test.
+
+## Reference kernels
+
+Four standalone kernels under `kernels/` implement ABI v3: add-one and ReLU
+(elementwise `f32`), matmul (`f32`), and xor-shift-add (`u64`).
+
+Matmul is deliberately a scalar, deterministic triple loop. It is not O(1):
+`C[M,N] = A[M,K] x B[K,N]` costs `M*N*K` multiply-adds, so no constant-time
+implementation is possible, and this reference makes that cost explicit rather
+than hiding it behind a library call. It exists to pin down the ABI contract —
+layout, parameter encoding, dimension validation, and buffer bounds — before
+any blocked, tiled, or SIMD implementation is admitted. A future optimized
+kernel must produce bit-identical results against this oracle.
+
+Xor-shift-add (`output[i] = (input[i] ^ (input[i] << shift)) + add`, with
+wrapping addition and `shift` in `0..=63`) represents the CPU-native integer
+path: pure ALU work with no floating-point, no memory beyond the caller's
+buffers, and fully specified wrapping behavior. It exercises the `U64` type
+ID and the parameterized operation contract.
+
+## Kernels versus compiled plans
+
+A kernel is a single dynamically loaded function with a fixed operation
+contract, admitted once and retained for the session. A compiled plan is the
+immutable artifact the runtime validates, maps, and executes as a sequence of
+fixed-width operation records; plugin records in a plan dispatch by index into
+the admitted kernel table. Kernels provide primitives; plans compose them.
+The ABI governs kernels, not plans: changing a plan never changes a kernel's
+contract.
+
+## In-process plugin trust
+
+Plugins are `dlopen`ed shared libraries running in the runtime's address
+space. Manifest hashing and descriptor validation provide integrity and
+compatibility checking, not isolation: a malicious or defective plugin can
+corrupt or crash the host process. Admission is therefore explicit
+(`kernel install`), verified by content hash on every load, bounded by a
+determinism probe, and limited to plugins the user deliberately supplies.
 
 ## UOR integration
 

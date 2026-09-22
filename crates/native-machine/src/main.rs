@@ -31,6 +31,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             cli::KernelCommand::Inspect { path } => plugin::inspect(&path)?,
             cli::KernelCommand::Test { path } => plugin::test(&path)?,
             cli::KernelCommand::Install { path } => plugin::install(&config, &path)?,
+            cli::KernelCommand::Demo => plugin::demo(&config)?,
         },
         Some(Command::Artifact { command }) => match command {
             cli::ArtifactCommand::Inspect { path } => artifact::inspect(Path::new(&path))?,

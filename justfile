@@ -53,8 +53,40 @@ build-kernels:
     done; \
     test "$found" -eq 1
 
+# Build every standalone kernel in release mode.
+build-kernels-release:
+    found=0; \
+    for manifest in kernels/*/Cargo.toml; do \
+        test -f "$manifest" || continue; \
+        found=1; \
+        echo "building $manifest in release mode"; \
+        RUSTC_WRAPPER= cargo build --release --manifest-path "$manifest"; \
+    done; \
+    test "$found" -eq 1
+
+# Build and install every standalone kernel into the local runtime.
+install-kernels: build-kernels
+    RUSTC_WRAPPER= cargo run -p native-machine -- init
+    case "$(uname -s)" in \
+        Darwin) library_prefix=lib; library_suffix=dylib ;; \
+        MINGW*|MSYS*|CYGWIN*) library_prefix=; library_suffix=dll ;; \
+        *) library_prefix=lib; library_suffix=so ;; \
+    esac; \
+    found=0; \
+    for manifest in kernels/*/Cargo.toml; do \
+        test -f "$manifest" || continue; \
+        found=1; \
+        kernel_dir="${manifest%/Cargo.toml}"; \
+        kernel_name="${kernel_dir##*/}"; \
+        library_name="${kernel_name//-/_}"; \
+        library="$kernel_dir/target/debug/${library_prefix}${library_name}.${library_suffix}"; \
+        test -f "$library" || { echo "missing compiled kernel: $library" >&2; exit 1; }; \
+        RUSTC_WRAPPER= cargo run -p native-machine -- kernel install "$library"; \
+    done; \
+    test "$found" -eq 1
+
 # Run CI, build the plugin, and produce release binaries.
-build-all: ci plugin build-kernels
+build-all: ci plugin build-kernels-release
     cargo build --workspace --release
 
 # Build and validate publishable crate packages.
@@ -85,6 +117,20 @@ inspect-host:
 # List installed kernel plugins and their verification status.
 kernel-list:
     cargo run -p native-machine -- kernel list
+
+# Run the unit tests of every standalone kernel crate.
+test-kernels:
+    found=0; \
+    for manifest in kernels/*/Cargo.toml; do \
+        test -f "$manifest" || continue; \
+        found=1; \
+        RUSTC_WRAPPER= cargo test --manifest-path "$manifest"; \
+    done; \
+    test "$found" -eq 1
+
+# Build, install, and exercise every reference kernel end to end.
+kernel-demo: install-kernels
+    RUSTC_WRAPPER= cargo run -p native-machine -- kernel demo
 
 # Create an artifact fixture at the requested path.
 artifact-create path="fixture.nm":

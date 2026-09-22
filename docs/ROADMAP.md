@@ -34,14 +34,18 @@
 - [x] deterministic manifest identity groundwork
 - [x] full-byte artifact identity
 - [x] canonical provenance identity path
-- [ ] allocation-counting test
+- [x] allocation-counting test
 - [ ] deterministic trace and byte-read accounting
 
 ## Phase 4 — native kernels
 
+- [x] ABI v3 byte-oriented kernel context and descriptor
+- [x] typed registry dispatch (elementwise, matmul, xor-shift-add)
+- [x] reference kernel suite: add-one, relu, matmul, xor-shift-add
+- [x] alignment and feature-floor validation
+- [x] zero-allocation typed dispatch test
 - [ ] one-time scalar/NEON/AVX2/VNNI dispatch
 - [ ] SIMD differential tests
-- [ ] alignment and feature-floor validation
 - [ ] kernel head-to-head benchmarks
 
 ## Phase 5 — compiler

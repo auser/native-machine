@@ -71,7 +71,20 @@ available commands.
 just run
 just plugin
 just run-plugin
+just install-kernels
+just kernel-list
+just kernel-demo
 ```
+
+`just install-kernels` initializes the local runtime, builds every standalone
+crate under `kernels/`, and installs each resulting shared library. It handles
+the platform-specific `.dylib`, `.so`, or `.dll` filename automatically. Run
+`just kernel-list` afterward to verify the installed manifests and plugin
+identities.
+
+`just kernel-demo` builds and installs the reference kernels, verifies their
+manifests, runs ReLU, a 2x2 matmul, and xor/shift/add over `u64` values, and
+demonstrates typed rejection of invalid dimensions, shifts, and buffer sizes.
 
 Run `just` to see every available development command. `just ci` is the local
 release gate.
@@ -93,13 +106,18 @@ Installation writes an adjacent `.manifest.toml` containing the plugin ABI,
 name, size, and SHA-256 identity. `kernel list` verifies those manifests and
 refuses to admit a changed or unmanifested plugin.
 
-The ABI descriptor is version 2 and declares input/output buffer types, scratch
-memory, and required CPU features. The loader resolves
-`hologram_kernel_plugin_v2` and rejects older or incompatible entry points. The
-current reference plugin declares `f32` input and output, zero scratch bytes,
-and no required optional CPU feature. A future kernel may require AVX2 or
-another explicitly supported feature and will be rejected on incompatible
-hosts.
+The ABI descriptor is version 3 and declares the ABI version, name,
+input/output buffer types (`F32 = 1`, `U64 = 2`), operation kind
+(`ELEMENTWISE = 1`, `MATMUL = 2`, `XOR_SHIFT_ADD = 3`), required alignment,
+scratch bytes, and required CPU features. The loader resolves only
+`hologram_kernel_plugin_v3` and rejects ABI v2 plugins and incompatible entry
+points. Invocation passes a bounded byte-oriented context
+(`input`/`output`/`params` pointers with fixed-width `u64` byte lengths); the
+registry exposes typed, allocation-free dispatch methods (`run_f32`,
+`run_matmul`, `run_u64`) that validate dimensions, alignment, buffer bounds,
+and parameter encodings before calling the kernel. A future kernel may require
+AVX2 or another explicitly supported feature and will be rejected on
+incompatible hosts.
 
 Runtime execution enforces `max_artifact_bytes` from the effective TOML
 configuration before mapping an artifact. This bounds admission separately
@@ -129,6 +147,10 @@ just test         # run all tests
 just lint         # run Clippy with warnings denied
 just build        # debug build of all targets
 just build-kernels # build every standalone kernel crate
+just build-kernels-release # build every kernel in release mode
+just test-kernels  # run every standalone kernel's unit tests
+just install-kernels # build and install every standalone kernel
+just kernel-demo  # install kernels and run the end-to-end kernel demo
 just build-all    # CI plus release builds and plugin build
 just package      # build crates and package them
 just release-check

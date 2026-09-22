@@ -52,6 +52,7 @@ pub enum KernelCommand {
     Inspect { path: PathBuf },
     Test { path: PathBuf },
     Install { path: PathBuf },
+    Demo,
 }
 
 #[derive(Subcommand, Debug)]
