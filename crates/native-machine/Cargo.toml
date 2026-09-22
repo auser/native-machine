@@ -1,0 +1,15 @@
+[package]
+name = "native-machine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "env"] }
+libloading = "0.8"
+memmap2 = "0.9"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.8"
+uor-addr = { version = "0.2.0", default-features = false, features = ["std"] }

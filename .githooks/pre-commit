@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+staged_rust_files=()
+while IFS= read -r -d '' path; do
+    staged_rust_files+=("$path")
+done < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs')
+
+if (( ${#staged_rust_files[@]} == 0 )); then
+    exit 0
+fi
+
+for path in "${staged_rust_files[@]}"; do
+    if ! git diff --quiet -- "$path"; then
+        echo "pre-commit: refusing to format partially staged Rust file: $path" >&2
+        echo "pre-commit: stage or stash its remaining changes, then commit again" >&2
+        exit 1
+    fi
+done
+
+echo "pre-commit: formatting staged Rust files"
+cargo fmt --all
+git add -- "${staged_rust_files[@]}"

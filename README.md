@@ -138,4 +138,3 @@ just release version=0.1.0
 a semantic-version tag; the GitHub Actions release workflow then publishes the
 GitHub release and release binary. Releases should only be created after the
 change has passed through the pull request and merge queue.
-# native-machine
