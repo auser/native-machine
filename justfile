@@ -49,7 +49,7 @@ build-kernels:
         test -f "$manifest" || continue; \
         found=1; \
         echo "building $manifest"; \
-        cargo build --manifest-path "$manifest"; \
+        RUSTC_WRAPPER= cargo build --manifest-path "$manifest"; \
     done; \
     test "$found" -eq 1
 
