@@ -22,5 +22,5 @@ for path in "${staged_rust_files[@]}"; do
 done
 
 echo "pre-commit: formatting staged Rust files"
-cargo fmt --all
+just fmt-fix
 git add -- "${staged_rust_files[@]}"

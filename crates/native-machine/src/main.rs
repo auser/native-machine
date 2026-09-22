@@ -84,17 +84,25 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod allocation_test_support {
     use std::alloc::{GlobalAlloc, Layout, System};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::cell::Cell;
 
-    static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+    thread_local! {
+        static TRACKING: Cell<bool> = const { Cell::new(false) };
+        static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    }
 
     pub struct CountingAllocator;
+    pub struct TrackingGuard;
 
     // SAFETY: each operation delegates to the platform allocator and only adds
-    // an atomic counter update.
+    // a thread-local counter update when the current test opts into tracking.
     unsafe impl GlobalAlloc for CountingAllocator {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            TRACKING.with(|tracking| {
+                if tracking.get() {
+                    ALLOCATIONS.with(|allocations| allocations.set(allocations.get() + 1));
+                }
+            });
             System.alloc(layout)
         }
 
@@ -106,10 +114,21 @@ mod allocation_test_support {
     #[global_allocator]
     static GLOBAL: CountingAllocator = CountingAllocator;
 
-    pub fn reset() {
-        ALLOCATIONS.store(0, Ordering::Relaxed);
+    pub fn track() -> TrackingGuard {
+        ALLOCATIONS.with(|allocations| allocations.set(0));
+        TRACKING.with(|tracking| tracking.set(true));
+        TrackingGuard
     }
-    pub fn count() -> usize {
-        ALLOCATIONS.load(Ordering::Relaxed)
+
+    impl TrackingGuard {
+        pub fn count(&self) -> usize {
+            ALLOCATIONS.with(Cell::get)
+        }
+    }
+
+    impl Drop for TrackingGuard {
+        fn drop(&mut self) {
+            TRACKING.with(|tracking| tracking.set(false));
+        }
     }
 }

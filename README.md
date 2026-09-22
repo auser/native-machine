@@ -128,6 +128,7 @@ just check        # compile all workspace targets
 just test         # run all tests
 just lint         # run Clippy with warnings denied
 just build        # debug build of all targets
+just build-kernels # build every standalone kernel crate
 just build-all    # CI plus release builds and plugin build
 just package      # build crates and package them
 just release-check

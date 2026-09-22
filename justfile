@@ -7,10 +7,18 @@ default:
 # Check Rust formatting without changing files.
 fmt:
     cargo fmt --all -- --check
+    for manifest in kernels/*/Cargo.toml; do \
+        test -f "$manifest" || continue; \
+        cargo fmt --manifest-path "$manifest" -- --check; \
+    done
 
 # Format all Rust source files in place.
 fmt-fix:
     cargo fmt --all
+    for manifest in kernels/*/Cargo.toml; do \
+        test -f "$manifest" || continue; \
+        cargo fmt --manifest-path "$manifest"; \
+    done
 
 # Enable the repository-managed Git hooks for this clone.
 install-hooks:
@@ -34,8 +42,19 @@ lint:
 build:
     cargo build --workspace --all-targets
 
+# Build every standalone kernel under the kernels directory.
+build-kernels:
+    found=0; \
+    for manifest in kernels/*/Cargo.toml; do \
+        test -f "$manifest" || continue; \
+        found=1; \
+        echo "building $manifest"; \
+        cargo build --manifest-path "$manifest"; \
+    done; \
+    test "$found" -eq 1
+
 # Run CI, build the plugin, and produce release binaries.
-build-all: ci plugin
+build-all: ci plugin build-kernels
     cargo build --workspace --release
 
 # Build and validate publishable crate packages.
@@ -103,4 +122,4 @@ release version="0.1.0": release-check
 
 # Create a clean-room source archive of the repository.
 archive:
-    tar -czf native-machine-clean-room.tar.gz --exclude=target --exclude='*.tar.gz' Cargo.toml README.md rust-toolchain.toml rust-best-practices.md justfile .gitignore .cargo .githooks crates docs .github
+    tar -czf native-machine-clean-room.tar.gz --exclude=target --exclude='*.tar.gz' Cargo.toml README.md rust-toolchain.toml rust-best-practices.md justfile .gitignore .cargo .githooks crates kernels docs .github
