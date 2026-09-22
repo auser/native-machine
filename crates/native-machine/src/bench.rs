@@ -79,9 +79,17 @@ fn f32_values(size: usize) -> Vec<f32> {
     (0..size).map(|index| index as f32 * 0.5 - 32.0).collect()
 }
 
+fn installed_kernels<'a>(registry: &PluginRegistry, candidates: &[&'a str]) -> Vec<&'a str> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|name| registry.kernel_index(name).is_some())
+        .collect()
+}
+
 fn bench_elementwise_f32(
     registry: &PluginRegistry,
-    kernel: &str,
+    kernels: &[&str],
     label: &str,
     size: usize,
     native: fn(&[f32], &mut [f32]),
@@ -89,32 +97,36 @@ fn bench_elementwise_f32(
 ) -> Result<(), Box<dyn Error>> {
     let input = f32_values(size);
     let mut output = vec![0.0_f32; size];
-    registry.run_f32(kernel, &input, &mut output)?;
     let (native_iterations, native_elapsed) =
         measure(|| native(black_box(&input), black_box(&mut output)));
-    let failures = Cell::new(0_u64);
-    let (iterations, elapsed) = measure(|| {
-        if registry
-            .run_f32(kernel, black_box(&input), black_box(&mut output))
-            .is_err()
-        {
-            failures.set(failures.get() + 1);
+    let native_ns = nanos(native_iterations, native_elapsed);
+    for kernel in kernels {
+        registry.run_f32(kernel, &input, &mut output)?;
+        let failures = Cell::new(0_u64);
+        let (iterations, elapsed) = measure(|| {
+            if registry
+                .run_f32(kernel, black_box(&input), black_box(&mut output))
+                .is_err()
+            {
+                failures.set(failures.get() + 1);
+            }
+        });
+        if failures.get() != 0 {
+            return Err(format!("kernel {kernel} failed during benchmarking").into());
         }
-    });
-    if failures.get() != 0 {
-        return Err(format!("kernel {kernel} failed during benchmarking").into());
+        rows.push(Row {
+            label: format!("{label} ({size} f32) via {kernel}"),
+            elements: size as u64,
+            native_ns: Some(native_ns),
+            dispatched_ns: nanos(iterations, elapsed),
+        });
     }
-    rows.push(Row {
-        label: format!("{label} ({size} f32)"),
-        elements: size as u64,
-        native_ns: Some(nanos(native_iterations, native_elapsed)),
-        dispatched_ns: nanos(iterations, elapsed),
-    });
     Ok(())
 }
 
 fn bench_matmul(
     registry: &PluginRegistry,
+    kernels: &[&str],
     dimension: u32,
     rows: &mut Vec<Row>,
 ) -> Result<(), Box<dyn Error>> {
@@ -126,15 +138,6 @@ fn bench_matmul(
     }
     let (a, b) = ab.split_at(elements);
     let mut output = vec![0.0_f32; elements];
-    registry.run_matmul(
-        "reference-matmul",
-        a,
-        b,
-        &mut output,
-        dimension,
-        dimension,
-        dimension,
-    )?;
     let (native_iterations, native_elapsed) = measure(|| {
         native_matmul(
             black_box(a),
@@ -145,37 +148,42 @@ fn bench_matmul(
             dimension_usize,
         );
     });
-    let failures = Cell::new(0_u64);
-    let (iterations, elapsed) = measure(|| {
-        if registry
-            .run_matmul(
-                "reference-matmul",
-                black_box(a),
-                black_box(b),
-                black_box(&mut output),
-                dimension,
-                dimension,
-                dimension,
-            )
-            .is_err()
-        {
-            failures.set(failures.get() + 1);
+    let native_ns = nanos(native_iterations, native_elapsed);
+    for kernel in kernels {
+        registry.run_matmul(kernel, a, b, &mut output, dimension, dimension, dimension)?;
+        let failures = Cell::new(0_u64);
+        let (iterations, elapsed) = measure(|| {
+            if registry
+                .run_matmul(
+                    kernel,
+                    black_box(a),
+                    black_box(b),
+                    black_box(&mut output),
+                    dimension,
+                    dimension,
+                    dimension,
+                )
+                .is_err()
+            {
+                failures.set(failures.get() + 1);
+            }
+        });
+        if failures.get() != 0 {
+            return Err(format!("kernel {kernel} failed during benchmarking").into());
         }
-    });
-    if failures.get() != 0 {
-        return Err("reference-matmul failed during benchmarking".into());
+        rows.push(Row {
+            label: format!("matmul ({dimension}x{dimension}x{dimension} f32) via {kernel}"),
+            elements: u64::from(dimension).pow(2),
+            native_ns: Some(native_ns),
+            dispatched_ns: nanos(iterations, elapsed),
+        });
     }
-    rows.push(Row {
-        label: format!("matmul ({dimension}x{dimension}x{dimension} f32)"),
-        elements: u64::from(dimension).pow(2),
-        native_ns: Some(nanos(native_iterations, native_elapsed)),
-        dispatched_ns: nanos(iterations, elapsed),
-    });
     Ok(())
 }
 
 fn bench_xor_shift_add(
     registry: &PluginRegistry,
+    kernels: &[&str],
     size: usize,
     rows: &mut Vec<Row>,
 ) -> Result<(), Box<dyn Error>> {
@@ -183,33 +191,30 @@ fn bench_xor_shift_add(
         .map(|index| (index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
         .collect();
     let mut output = vec![0_u64; size];
-    registry.run_u64("reference-xor-shift-add", &input, &mut output, 13, 7)?;
     let (native_iterations, native_elapsed) =
         measure(|| native_xor_shift_add(black_box(&input), black_box(&mut output), 13, 7));
-    let failures = Cell::new(0_u64);
-    let (iterations, elapsed) = measure(|| {
-        if registry
-            .run_u64(
-                "reference-xor-shift-add",
-                black_box(&input),
-                black_box(&mut output),
-                13,
-                7,
-            )
-            .is_err()
-        {
-            failures.set(failures.get() + 1);
+    let native_ns = nanos(native_iterations, native_elapsed);
+    for kernel in kernels {
+        registry.run_u64(kernel, &input, &mut output, 13, 7)?;
+        let failures = Cell::new(0_u64);
+        let (iterations, elapsed) = measure(|| {
+            if registry
+                .run_u64(kernel, black_box(&input), black_box(&mut output), 13, 7)
+                .is_err()
+            {
+                failures.set(failures.get() + 1);
+            }
+        });
+        if failures.get() != 0 {
+            return Err(format!("kernel {kernel} failed during benchmarking").into());
         }
-    });
-    if failures.get() != 0 {
-        return Err("reference-xor-shift-add failed during benchmarking".into());
+        rows.push(Row {
+            label: format!("xor-shift-add ({size} u64) via {kernel}"),
+            elements: size as u64,
+            native_ns: Some(native_ns),
+            dispatched_ns: nanos(iterations, elapsed),
+        });
     }
-    rows.push(Row {
-        label: format!("xor-shift-add ({size} u64)"),
-        elements: size as u64,
-        native_ns: Some(nanos(native_iterations, native_elapsed)),
-        dispatched_ns: nanos(iterations, elapsed),
-    });
     Ok(())
 }
 
@@ -327,9 +332,21 @@ fn measure_dispatch_allocations(registry: &PluginRegistry) -> Result<usize, Box<
     let mut words_output = vec![0_u64; 64];
     let tracking = crate::allocation::track();
     for _ in 0..ALLOCATION_DISPATCHES {
-        registry.run_f32("reference-add-one", &input, &mut output)?;
-        registry.run_matmul("reference-matmul", a, b, &mut c, 2, 2, 2)?;
-        registry.run_u64("reference-xor-shift-add", &words, &mut words_output, 13, 7)?;
+        for kernel in ["reference-add-one", "neon-add-one"] {
+            if registry.kernel_index(kernel).is_some() {
+                registry.run_f32(kernel, &input, &mut output)?;
+            }
+        }
+        for kernel in ["reference-matmul", "neon-matmul"] {
+            if registry.kernel_index(kernel).is_some() {
+                registry.run_matmul(kernel, a, b, &mut c, 2, 2, 2)?;
+            }
+        }
+        for kernel in ["reference-xor-shift-add", "neon-xor-shift-add"] {
+            if registry.kernel_index(kernel).is_some() {
+                registry.run_u64(kernel, &words, &mut words_output, 13, 7)?;
+            }
+        }
     }
     let allocations = tracking.count();
     drop(tracking);
@@ -372,29 +389,29 @@ pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     );
 
     let mut rows = Vec::new();
+    let add_one = installed_kernels(&registry, &["reference-add-one", "neon-add-one"]);
+    let relu = installed_kernels(&registry, &["reference-relu", "neon-relu"]);
+    let matmul = installed_kernels(&registry, &["reference-matmul", "neon-matmul"]);
+    let xor_shift_add = installed_kernels(
+        &registry,
+        &["reference-xor-shift-add", "neon-xor-shift-add"],
+    );
     for size in [1, 64, 4096] {
         bench_elementwise_f32(
             &registry,
-            "reference-add-one",
+            &add_one,
             "add-one",
             size,
             native_add_one,
             &mut rows,
         )?;
     }
-    bench_elementwise_f32(
-        &registry,
-        "reference-relu",
-        "relu",
-        4096,
-        native_relu,
-        &mut rows,
-    )?;
+    bench_elementwise_f32(&registry, &relu, "relu", 4096, native_relu, &mut rows)?;
     for dimension in [16, 32, 64] {
-        bench_matmul(&registry, dimension, &mut rows)?;
+        bench_matmul(&registry, &matmul, dimension, &mut rows)?;
     }
     for size in [1, 64, 4096] {
-        bench_xor_shift_add(&registry, size, &mut rows)?;
+        bench_xor_shift_add(&registry, &xor_shift_add, size, &mut rows)?;
     }
     bench_record_path(&registry, &mut rows)?;
 
@@ -432,8 +449,7 @@ pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
 
     let allocations = measure_dispatch_allocations(&registry)?;
     println!(
-        "\nheap allocations: {allocations} across {ALLOCATION_DISPATCHES} dispatches of each typed kernel ({} total)",
-        ALLOCATION_DISPATCHES * 3
+        "\nheap allocations: {allocations} across {ALLOCATION_DISPATCHES} rounds of typed dispatch over every installed kernel"
     );
     if allocations != 0 {
         return Err("typed dispatch allocated on the success path".into());

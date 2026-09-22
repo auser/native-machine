@@ -1,5 +1,5 @@
 [package]
-name = "reference-relu"
+name = "neon-add-one"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -8,6 +8,9 @@ publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+[dev-dependencies]
+reference-add-one = { path = "../reference-add-one" }
 
 [profile.release]
 panic = "abort"

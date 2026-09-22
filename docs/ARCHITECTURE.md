@@ -63,6 +63,15 @@ no heap allocation, verified by an allocation-counting test.
 Four standalone kernels under `kernels/` implement ABI v3: add-one and ReLU
 (elementwise `f32`), matmul (`f32`), and xor-shift-add (`u64`).
 
+Alongside them, `neon-*` crates implement the same contracts with
+NEON-accelerated hot loops on AArch64 (scalar fallback elsewhere). Their
+descriptors declare the NEON CPU feature bit, so the admission feature floor
+rejects them on hosts without NEON. Differential tests prove them against the
+reference oracles: bitwise for exact operations, bounded-ULP for matmul,
+whose FMA contraction may differ from the scalar reference in the last
+mantissa bit. `neon-matmul` uses a 4x4 register-blocked micro-kernel that
+vectorizes across columns instead of reducing along `K`.
+
 Matmul is deliberately a scalar, deterministic triple loop. It is not O(1):
 `C[M,N] = A[M,K] x B[K,N]` costs `M*N*K` multiply-adds, so no constant-time
 implementation is possible, and this reference makes that cost explicit rather

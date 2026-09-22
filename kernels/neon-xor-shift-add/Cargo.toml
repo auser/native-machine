@@ -1,5 +1,5 @@
 [package]
-name = "reference-relu"
+name = "neon-xor-shift-add"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -8,6 +8,9 @@ publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+[dev-dependencies]
+reference-xor-shift-add = { path = "../reference-xor-shift-add" }
 
 [profile.release]
 panic = "abort"

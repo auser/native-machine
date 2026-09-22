@@ -11,6 +11,14 @@ Included kernels:
 - `reference-matmul`: `C[M,N] = A[M,K] x B[K,N]` (row-major contiguous `f32`)
 - `reference-xor-shift-add`: `output[i] = (input[i] ^ (input[i] << shift)) + add`
   (`u64`, wrapping)
+- `neon-add-one`, `neon-relu`, `neon-matmul`, `neon-xor-shift-add`: the same
+  contracts with NEON-accelerated hot loops on AArch64 (scalar fallback
+  elsewhere). `neon-matmul` uses a 4x4 register-blocked FMA micro-kernel.
+
+The `reference-*` crates are the scalar oracles; the `neon-*` crates declare
+the NEON CPU feature bit in their descriptors and prove equivalence with
+differential tests against the reference crates (bitwise where the operation
+is exact, bounded-ULP where FMA contraction applies).
 
 Build every kernel from the repository root:
 

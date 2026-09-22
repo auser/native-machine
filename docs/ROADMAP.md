@@ -44,8 +44,9 @@
 - [x] reference kernel suite: add-one, relu, matmul, xor-shift-add
 - [x] alignment and feature-floor validation
 - [x] zero-allocation typed dispatch test
-- [ ] one-time scalar/NEON/AVX2/VNNI dispatch
-- [ ] SIMD differential tests
+- [x] NEON kernel tier with descriptor-declared CPU feature floor
+- [x] SIMD differential tests (NEON vs scalar reference oracles)
+- [ ] one-time scalar/NEON/AVX2/VNNI dispatch in built-in operations
 - [x] kernel head-to-head benchmarks (`just bench`, native baseline ratios)
 
 ## Phase 5 — compiler
