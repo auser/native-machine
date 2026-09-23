@@ -157,7 +157,10 @@ static PLUGIN: KernelPlugin = KernelPlugin {
     cpu_features: REQUIRED_FEATURES,
 };
 
-#[no_mangle]
+// Export the entry symbol only in non-test builds so unit tests can
+// statically link a reference kernel crate, which exports the same ABI
+// symbol, without duplicate-symbol link errors (lld on Linux rejects them).
+#[cfg_attr(not(test), no_mangle)]
 pub extern "C" fn hologram_kernel_plugin_v3() -> *const KernelPlugin {
     &PLUGIN
 }
