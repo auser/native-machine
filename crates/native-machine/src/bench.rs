@@ -261,6 +261,68 @@ fn bench_resolved_dispatch(
     Ok(())
 }
 
+/// Compares a chained plan of three built-in add-scalar records executed by
+/// the fusing chain executor (one pass over the buffers) against three
+/// unfused native passes (each intermediate round-trips through memory).
+fn bench_fused_plan_chain(
+    registry: &PluginRegistry,
+    rows: &mut Vec<Row>,
+) -> Result<(), Box<dyn Error>> {
+    let size = crate::arena::MAX_VALUES;
+    let mut records = Vec::new();
+    for _ in 0..3 {
+        let mut record = [0_u8; ops::OPERATION_BYTES];
+        record[0..2].copy_from_slice(&1_u16.to_le_bytes());
+        record[4..8].copy_from_slice(&1.0_f32.to_le_bytes());
+        record[8..12].copy_from_slice(&(size as u32).to_le_bytes());
+        record[12..16].copy_from_slice(&(size as u32).to_le_bytes());
+        records.extend_from_slice(&record);
+    }
+    let mut arena = SessionArena::new();
+    arena.load_input(&f32_values(size))?;
+    let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
+    ops::execute_chain_with_plugins(&mut arena, &records, &mut scratch, registry)?;
+
+    let failures = Cell::new(0_u64);
+    let (fused_iterations, fused_elapsed) = measure(|| {
+        if ops::execute_chain_with_plugins(
+            black_box(&mut arena),
+            black_box(&records),
+            black_box(&mut scratch),
+            registry,
+        )
+        .is_err()
+        {
+            failures.set(failures.get() + 1);
+        }
+    });
+    let input = f32_values(size);
+    let mut first = input.clone();
+    let mut second = vec![0.0_f32; size];
+    let (pass_iterations, pass_elapsed) = measure(|| {
+        for (source, destination) in first.iter().zip(second.iter_mut()) {
+            *destination = *source + 1.0;
+        }
+        for (source, destination) in second.iter().zip(first.iter_mut()) {
+            *destination = *source + 1.0;
+        }
+        for (source, destination) in first.iter().zip(second.iter_mut()) {
+            *destination = *source + 1.0;
+        }
+        black_box(&second);
+    });
+    if failures.get() != 0 {
+        return Err("fused plan chain failed during benchmarking".into());
+    }
+    rows.push(Row {
+        label: format!("plan chain add x3 fused ({size} f32)"),
+        elements: size as u64,
+        native_ns: Some(nanos(pass_iterations, pass_elapsed)),
+        dispatched_ns: nanos(fused_iterations, fused_elapsed),
+    });
+    Ok(())
+}
+
 /// Compares a chained matmul + relu (two dispatches, C round-trips through
 /// memory) against the fused MATMUL_ACT kernel (activation applied to the
 /// accumulators, C written once). Uses a thin-K memory-bound shape where
@@ -584,6 +646,7 @@ pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     }
     bench_resolved_dispatch(&registry, &mut rows)?;
     bench_fused_matmul(&registry, &mut rows)?;
+    bench_fused_plan_chain(&registry, &mut rows)?;
     bench_record_path(&registry, &mut rows)?;
 
     println!(

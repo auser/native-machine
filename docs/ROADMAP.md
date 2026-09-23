@@ -49,6 +49,8 @@
 - [x] AVX2+FMA3 matmul tier with descriptor-declared FMA feature floor
 - [x] K-blocked panel matmul (L1-resident B slices, C accumulates in memory)
 - [x] fused matmul + activation kernel (`MATMUL_ACT`)
+- [x] chained plan executor with built-in operation fusion
+- [x] zero-copy plugin record dispatch
 - [x] SIMD differential tests (NEON vs scalar reference oracles)
 - [x] resolve-once kernel handles for hot-loop dispatch
 - [ ] one-time scalar/NEON/AVX2/VNNI dispatch in built-in operations

@@ -114,6 +114,22 @@ the admitted kernel table. Kernels provide primitives; plans compose them.
 The ABI governs kernels, not plans: changing a plan never changes a kernel's
 contract.
 
+Fusion exists at both levels. Kernel-level fusion is a new operation kind
+(`MATMUL_ACT`): the activation is applied to accumulators before the single
+output store. Plan-level fusion lives in the chained record executor
+(`execute_chain_with_plugins`): records consume the previous record's output,
+and maximal runs of built-in elementwise records execute as one fused pass —
+each element is transformed by every operation in the run before moving to
+the next, which is bitwise identical to separate passes while intermediates
+never round-trip through memory. Plugin records are opaque to the executor
+and break fusion runs; dispatching them is zero-copy straight from the
+session input. Measured honestly: at the fixed session arena's
+cache-resident sizes the fused executor is performance-neutral against raw
+unfused passes (there is no memory round-trip to avoid in L1), so the win
+materializes only for plans whose intermediate buffers exceed cache; the
+zero-copy plugin dispatch it enabled cut artifact record dispatch from
+2.3x to ~1.1x native.
+
 ## In-process plugin trust
 
 Plugins are `dlopen`ed shared libraries running in the runtime's address

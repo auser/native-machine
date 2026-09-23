@@ -59,6 +59,25 @@ impl SessionArena {
         self.output_len = length;
         Ok(&mut self.output[..length])
     }
+
+    /// Returns the input and output buffers together (they are disjoint
+    /// fields), enabling zero-copy dispatch straight from the session input.
+    pub fn input_and_output_mut(
+        &mut self,
+        output_length: usize,
+    ) -> Result<(&[f32], &mut [f32]), ArenaError> {
+        if output_length > MAX_VALUES {
+            return Err(ArenaError::OutputTooLarge {
+                required: output_length,
+                capacity: MAX_VALUES,
+            });
+        }
+        self.output_len = output_length;
+        Ok((
+            &self.input[..self.input_len],
+            &mut self.output[..output_length],
+        ))
+    }
 }
 
 impl Default for SessionArena {

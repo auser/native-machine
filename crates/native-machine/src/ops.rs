@@ -25,6 +25,8 @@ pub enum ExecuteError {
     UnknownOpcode(usize, u16),
     #[error("operation record {0} has incompatible lengths")]
     RecordLength(usize),
+    #[error("operation record {0} breaks the input/output length chain")]
+    RecordChain(usize),
     #[error("plugin dispatch failed: {0}")]
     Plugin(String),
 }
@@ -149,6 +151,200 @@ pub fn execute_records_with_scratch(
     Ok(())
 }
 
+/// Where the current value of a chained plan resides between segments.
+enum ChainSource {
+    ArenaInput,
+    ArenaOutput,
+    Scratch,
+}
+
+/// Executes records as a chain: each record consumes the previous record's
+/// output (the first consumes the session input). Consecutive built-in
+/// elementwise records are fused into a single pass: each element is
+/// transformed by every operation in the run before moving to the next, so
+/// results are bitwise identical to executing the passes separately while
+/// the intermediate values never round-trip through memory. Plugin records
+/// break fusion runs and are dispatched whole-buffer. No allocation occurs
+/// on the success path.
+pub fn execute_chain_with_plugins<D: PluginDispatch>(
+    arena: &mut SessionArena,
+    records: &[u8],
+    scratch: &mut [f32],
+    plugins: &D,
+) -> Result<(), ExecuteError> {
+    let (records, remainder) = records.as_chunks::<OPERATION_BYTES>();
+    if !remainder.is_empty() {
+        return Err(ExecuteError::RecordAlignment(OPERATION_BYTES));
+    }
+    if records.is_empty() {
+        return Ok(());
+    }
+    let length = arena.input().len();
+    if length > scratch.len() {
+        return Err(ExecuteError::Arena(ArenaError::InputTooLarge {
+            required: length,
+            capacity: scratch.len(),
+        }));
+    }
+    // Validate the whole chain before touching any buffer: every record is
+    // elementwise (input length equals output length) and matches the chain.
+    for (index, record) in records.iter().enumerate() {
+        let opcode = u16::from_le_bytes([record[0], record[1]]);
+        if !matches!(opcode, 0 | 1 | PLUGIN_OPCODE) {
+            return Err(ExecuteError::UnknownOpcode(index, opcode));
+        }
+        let input_length = u32::from_le_bytes(
+            record[8..12]
+                .try_into()
+                .map_err(|_| ExecuteError::RecordTruncated(index))?,
+        );
+        let output_length = u32::from_le_bytes(
+            record[12..16]
+                .try_into()
+                .map_err(|_| ExecuteError::RecordTruncated(index))?,
+        );
+        if input_length != output_length {
+            return Err(ExecuteError::RecordLength(index));
+        }
+        if usize::try_from(input_length).map_err(|_| ExecuteError::RecordLength(index))? != length {
+            return Err(ExecuteError::RecordChain(index));
+        }
+    }
+    let mut index = 0;
+    let mut source = ChainSource::ArenaInput;
+    while index < records.len() {
+        // A segment is one plugin record or a maximal run of built-in
+        // records (which the executor fuses into one pass).
+        let opcode = u16::from_le_bytes([records[index][0], records[index][1]]);
+        let mut segment_end = index + 1;
+        if opcode != PLUGIN_OPCODE {
+            while segment_end < records.len()
+                && u16::from_le_bytes([records[segment_end][0], records[segment_end][1]])
+                    != PLUGIN_OPCODE
+            {
+                segment_end += 1;
+            }
+        }
+        let segment = &records[index..segment_end];
+        match source {
+            ChainSource::ArenaInput => {
+                let (input, output) = arena.input_and_output_mut(length)?;
+                execute_segment(segment, index, input, output, plugins)?;
+                source = ChainSource::ArenaOutput;
+            }
+            ChainSource::ArenaOutput => {
+                execute_segment(
+                    segment,
+                    index,
+                    arena.output(),
+                    &mut scratch[..length],
+                    plugins,
+                )?;
+                source = ChainSource::Scratch;
+            }
+            ChainSource::Scratch => {
+                let output = arena.output_mut(length)?;
+                execute_segment(segment, index, &scratch[..length], output, plugins)?;
+                source = ChainSource::ArenaOutput;
+            }
+        }
+        index = segment_end;
+    }
+    if matches!(source, ChainSource::Scratch) {
+        let output = arena.output_mut(length)?;
+        output.copy_from_slice(&scratch[..length]);
+    }
+    Ok(())
+}
+
+/// Maximum built-in operations fused into one pass; longer runs execute as
+/// several in-place passes, still without touching intermediate buffers
+/// beyond the strip-mined chunks.
+const MAX_FUSED_OPERATIONS: usize = 64;
+
+/// Elements processed per strip; the chunk stays L1-resident while every
+/// fused operation is applied to it.
+const FUSED_STRIP: usize = 256;
+
+fn execute_segment<D: PluginDispatch>(
+    segment: &[[u8; OPERATION_BYTES]],
+    segment_index: usize,
+    input: &[f32],
+    output: &mut [f32],
+    plugins: &D,
+) -> Result<(), ExecuteError> {
+    let opcode = u16::from_le_bytes([segment[0][0], segment[0][1]]);
+    if opcode == PLUGIN_OPCODE {
+        let plugin_index = u16::from_le_bytes([segment[0][2], segment[0][3]]) as usize;
+        return plugins
+            .run_index(plugin_index, input, output)
+            .map_err(ExecuteError::Plugin);
+    }
+    // Validation guarantees this run contains only Copy and AddScalar
+    // records. Operands are parsed once per group, then each strip of
+    // elements is transformed by every operation in the group before moving
+    // on, so results are bitwise identical to separate passes while the
+    // intermediates stay register/L1-resident instead of round-tripping
+    // through memory.
+    let mut group_start = 0;
+    while group_start < segment.len() {
+        let group_end = (group_start + MAX_FUSED_OPERATIONS).min(segment.len());
+        let group = &segment[group_start..group_end];
+        let mut operands = [0.0_f32; MAX_FUSED_OPERATIONS];
+        let mut count = 0;
+        for (offset, record) in group.iter().enumerate() {
+            if u16::from_le_bytes([record[0], record[1]]) == 1 {
+                operands[count] = f32::from_le_bytes(
+                    record[4..8]
+                        .try_into()
+                        .map_err(|_| ExecuteError::RecordTruncated(segment_index + offset))?,
+                );
+                count += 1;
+            }
+        }
+        let operands = &operands[..count];
+        if group_start == 0 {
+            // The first AddScalar fuses into the input copy, so a fused run
+            // costs exactly one pass per operation — the same as unfused
+            // passes at cache-resident sizes, and one pass total when the
+            // buffers exceed cache.
+            let (first, rest) = match operands.split_first() {
+                Some((first, rest)) => (*first, rest),
+                None => (0.0, &[][..]),
+            };
+            for (input_chunk, output_chunk) in input
+                .chunks(FUSED_STRIP)
+                .zip(output.chunks_mut(FUSED_STRIP))
+            {
+                if count > 0 {
+                    for (source, destination) in input_chunk.iter().zip(output_chunk.iter_mut()) {
+                        *destination = *source + first;
+                    }
+                } else {
+                    output_chunk.copy_from_slice(input_chunk);
+                }
+                for operand in rest {
+                    for value in output_chunk.iter_mut() {
+                        *value += *operand;
+                    }
+                }
+            }
+        } else {
+            // Later groups refine the output in place; elementwise AddScalar
+            // is safe to apply read-modify-write per strip.
+            for chunk in output.chunks_mut(FUSED_STRIP) {
+                for operand in operands {
+                    for value in chunk.iter_mut() {
+                        *value += *operand;
+                    }
+                }
+            }
+        }
+        group_start = group_end;
+    }
+    Ok(())
+}
+
 pub fn execute_records_with_plugins<D: PluginDispatch>(
     arena: &mut SessionArena,
     records: &[u8],
@@ -182,10 +378,12 @@ pub fn execute_records_with_plugins<D: PluginDispatch>(
             continue;
         }
         let plugin_index = u16::from_le_bytes([record[2], record[3]]) as usize;
-        scratch[..arena.input().len()].copy_from_slice(arena.input());
-        let output = arena.output_mut(arena.input().len())?;
+        // Zero-copy: the plugin reads the session input directly; input and
+        // output are disjoint arena buffers.
+        let input_length = arena.input().len();
+        let (input, output) = arena.input_and_output_mut(input_length)?;
         plugins
-            .run_index(plugin_index, &scratch[..output.len()], output)
+            .run_index(plugin_index, input, output)
             .map_err(ExecuteError::Plugin)?;
     }
     Ok(())
@@ -267,6 +465,100 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    fn chain_records(values: &[(u16, f32)], length: u32) -> Vec<u8> {
+        let mut records = Vec::new();
+        for (opcode, value) in values {
+            let mut record = [0_u8; OPERATION_BYTES];
+            record[0..2].copy_from_slice(&opcode.to_le_bytes());
+            record[4..8].copy_from_slice(&value.to_le_bytes());
+            record[8..12].copy_from_slice(&length.to_le_bytes());
+            record[12..16].copy_from_slice(&length.to_le_bytes());
+            records.extend_from_slice(&record);
+        }
+        records
+    }
+
+    #[test]
+    fn chained_builtin_records_match_sequential_passes() {
+        let mut arena = SessionArena::new();
+        arena.load_input(&[1.0, 2.0, 3.0]).expect("input fits");
+        let records = chain_records(&[(1, 1.0), (1, 2.0), (1, 3.0)], 3);
+        let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
+        execute_chain_with_plugins(&mut arena, &records, &mut scratch, &TestPlugin)
+            .expect("chain executes");
+        assert_eq!(arena.output(), &[7.0, 8.0, 9.0]);
+        for (index, value) in [1.0_f32, 2.0, 3.0].iter().enumerate() {
+            let sequential = ((value + 1.0) + 2.0) + 3.0;
+            assert_eq!(arena.output()[index].to_bits(), sequential.to_bits());
+        }
+    }
+
+    #[test]
+    fn chain_dispatches_plugin_between_builtin_runs() {
+        let mut arena = SessionArena::new();
+        arena.load_input(&[1.0, 2.0]).expect("input fits");
+        let records = chain_records(&[(1, 1.0), (PLUGIN_OPCODE, 0.0), (1, 1.0)], 2);
+        let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
+        execute_chain_with_plugins(&mut arena, &records, &mut scratch, &TestPlugin)
+            .expect("chain executes");
+        assert_eq!(arena.output(), &[5.0, 6.0]);
+    }
+
+    #[test]
+    fn chain_result_lands_in_output_for_even_segment_counts() {
+        let mut arena = SessionArena::new();
+        arena.load_input(&[1.0, 2.0]).expect("input fits");
+        let records = chain_records(&[(PLUGIN_OPCODE, 0.0), (1, 1.0)], 2);
+        let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
+        execute_chain_with_plugins(&mut arena, &records, &mut scratch, &TestPlugin)
+            .expect("chain executes");
+        assert_eq!(arena.output(), &[4.0, 5.0]);
+    }
+
+    #[test]
+    fn chain_rejects_length_break() {
+        let mut arena = SessionArena::new();
+        arena.load_input(&[1.0, 2.0]).expect("input fits");
+        let mut records = chain_records(&[(1, 1.0)], 2);
+        let mut record = [0_u8; OPERATION_BYTES];
+        record[0..2].copy_from_slice(&1_u16.to_le_bytes());
+        record[8..12].copy_from_slice(&4_u32.to_le_bytes());
+        record[12..16].copy_from_slice(&4_u32.to_le_bytes());
+        records.extend_from_slice(&record);
+        let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
+        assert!(matches!(
+            execute_chain_with_plugins(&mut arena, &records, &mut scratch, &TestPlugin),
+            Err(ExecuteError::RecordChain(1))
+        ));
+        assert_eq!(arena.output().len(), 0);
+    }
+
+    #[test]
+    fn chain_rejects_unknown_opcode() {
+        let mut arena = SessionArena::new();
+        arena.load_input(&[1.0, 2.0]).expect("input fits");
+        let records = chain_records(&[(99, 0.0)], 2);
+        let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
+        assert!(matches!(
+            execute_chain_with_plugins(&mut arena, &records, &mut scratch, &TestPlugin),
+            Err(ExecuteError::UnknownOpcode(0, 99))
+        ));
+    }
+
+    #[test]
+    fn chained_execution_does_not_allocate_with_caller_scratch() {
+        let mut arena = SessionArena::new();
+        arena.load_input(&[1.0, 2.0]).expect("input fits");
+        let records = chain_records(&[(1, 1.0), (PLUGIN_OPCODE, 0.0), (1, 1.0)], 2);
+        let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
+        let tracking = crate::allocation::track();
+        execute_chain_with_plugins(&mut arena, &records, &mut scratch, &TestPlugin)
+            .expect("chain executes");
+        let allocations = tracking.count();
+        drop(tracking);
+        assert_eq!(allocations, 0);
     }
 
     #[test]
