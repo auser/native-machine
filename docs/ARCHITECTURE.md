@@ -40,6 +40,12 @@ features, and the entry function. Type IDs are `F32 = 1` and `U64 = 2`;
 operation kinds are `ELEMENTWISE = 1`, `MATMUL = 2`, and `XOR_SHIFT_ADD = 3`;
 CPU feature bits are `AVX2 = 1`, `NEON = 2`, and `FMA = 4` (x86 FMA3;
 AArch64 fused multiply-add is covered by the NEON bit).
+`MATMUL_ACT = 4` is the fused variant of matmul: its 16-byte params add a
+`u32` activation kind (0 = none, 1 = ReLU) applied to the accumulators
+before the single output store, so `C` is written once and never re-read.
+Fusion belongs to the kernel, not the runtime: the record executor stays a
+thin dispatcher, and a future compiler chooses between emitting separate
+matmul and activation records or one fused record.
 
 Invocation passes a bounded byte-oriented context:
 

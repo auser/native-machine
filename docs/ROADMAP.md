@@ -47,6 +47,8 @@
 - [x] NEON kernel tier with descriptor-declared CPU feature floor
 - [x] AVX2 kernel tier with runtime detection and scalar fallback
 - [x] AVX2+FMA3 matmul tier with descriptor-declared FMA feature floor
+- [x] K-blocked panel matmul (L1-resident B slices, C accumulates in memory)
+- [x] fused matmul + activation kernel (`MATMUL_ACT`)
 - [x] SIMD differential tests (NEON vs scalar reference oracles)
 - [x] resolve-once kernel handles for hot-loop dispatch
 - [ ] one-time scalar/NEON/AVX2/VNNI dispatch in built-in operations

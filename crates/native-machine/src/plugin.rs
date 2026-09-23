@@ -16,7 +16,11 @@ pub const TYPE_U64: u16 = 2;
 pub const OPERATION_ELEMENTWISE: u16 = 1;
 pub const OPERATION_MATMUL: u16 = 2;
 pub const OPERATION_XOR_SHIFT_ADD: u16 = 3;
+/// Matmul with a fused activation applied to accumulators before the single
+/// output store; params add a `u32` activation kind (0 = none, 1 = ReLU).
+pub const OPERATION_MATMUL_ACT: u16 = 4;
 pub const MAX_SHIFT: u32 = 63;
+pub const MAX_ACTIVATION: u32 = 1;
 
 const CPU_AVX2: u64 = 1;
 const CPU_NEON: u64 = 2;
@@ -28,6 +32,7 @@ const MAX_NAME_BYTES: usize = 64;
 const MAX_ALIGNMENT: u32 = 64;
 const MAX_SCRATCH_BYTES: u64 = 1024 * 1024;
 const MATMUL_PARAMS_BYTES: usize = 12;
+const MATMUL_ACT_PARAMS_BYTES: usize = 16;
 const XOR_SHIFT_ADD_PARAMS_BYTES: usize = 16;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -131,6 +136,8 @@ pub enum PluginError {
     OutputTooSmall,
     #[error("xor-shift-add shift {0} exceeds the valid range 0..={MAX_SHIFT}")]
     InvalidShift(u32),
+    #[error("activation kind {0} exceeds the valid range 0..={MAX_ACTIVATION}")]
+    InvalidActivation(u32),
     #[error("plugin requires unsupported CPU features: {0:#x}")]
     CpuFeatures(u64),
     #[error("plugin declares unsupported scratch memory: {0} bytes")]
@@ -281,6 +288,22 @@ impl PluginRegistry {
         self.kernel(name)?.run_matmul(a, b, output, m, k, n)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_matmul_act(
+        &self,
+        name: &str,
+        a: &[f32],
+        b: &[f32],
+        output: &mut [f32],
+        m: u32,
+        k: u32,
+        n: u32,
+        activation: u32,
+    ) -> Result<(), PluginError> {
+        self.kernel(name)?
+            .run_matmul_act(a, b, output, m, k, n, activation)
+    }
+
     pub fn run_u64(
         &self,
         name: &str,
@@ -426,6 +449,38 @@ impl LoadedKernel {
         n: u32,
     ) -> Result<(), PluginError> {
         self.check_contract(OPERATION_MATMUL, TYPE_F32, TYPE_F32)?;
+        self.run_matmul_inner(a, b, output, m, k, n, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_matmul_act(
+        &self,
+        a: &[f32],
+        b: &[f32],
+        output: &mut [f32],
+        m: u32,
+        k: u32,
+        n: u32,
+        activation: u32,
+    ) -> Result<(), PluginError> {
+        self.check_contract(OPERATION_MATMUL_ACT, TYPE_F32, TYPE_F32)?;
+        if activation > MAX_ACTIVATION {
+            return Err(PluginError::InvalidActivation(activation));
+        }
+        self.run_matmul_inner(a, b, output, m, k, n, Some(activation))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_matmul_inner(
+        &self,
+        a: &[f32],
+        b: &[f32],
+        output: &mut [f32],
+        m: u32,
+        k: u32,
+        n: u32,
+        activation: Option<u32>,
+    ) -> Result<(), PluginError> {
         if m == 0 || k == 0 || n == 0 {
             return Err(PluginError::InvalidDimensions);
         }
@@ -441,10 +496,17 @@ impl LoadedKernel {
         if b.as_ptr() != a.as_ptr().wrapping_add(a.len()) {
             return Err(PluginError::NonContiguousInputs);
         }
-        let mut params = [0_u8; MATMUL_PARAMS_BYTES];
+        let params_len = match activation {
+            Some(_) => MATMUL_ACT_PARAMS_BYTES,
+            None => MATMUL_PARAMS_BYTES,
+        };
+        let mut params = [0_u8; MATMUL_ACT_PARAMS_BYTES];
         params[0..4].copy_from_slice(&m.to_le_bytes());
         params[4..8].copy_from_slice(&k.to_le_bytes());
         params[8..12].copy_from_slice(&n.to_le_bytes());
+        if let Some(activation) = activation {
+            params[12..16].copy_from_slice(&activation.to_le_bytes());
+        }
         let input_elements = a.len() + b.len();
         self.invoke(
             (
@@ -454,7 +516,7 @@ impl LoadedKernel {
                     .ok_or(PluginError::LengthOverflow)?,
             ),
             (output.as_mut_ptr().cast(), std::mem::size_of_val(output)),
-            &params,
+            &params[..params_len],
         )
     }
 
@@ -502,7 +564,7 @@ fn check_descriptor(descriptor: &KernelPlugin) -> Result<(), PluginError> {
                 return Err(PluginError::BufferType);
             }
         }
-        OPERATION_MATMUL => {
+        OPERATION_MATMUL | OPERATION_MATMUL_ACT => {
             if descriptor.input_type != TYPE_F32 || descriptor.output_type != TYPE_F32 {
                 return Err(PluginError::BufferType);
             }
@@ -739,6 +801,24 @@ fn probe_determinism(kernel: &LoadedKernel, rounds: usize) -> Result<(), PluginE
             }
             Ok(())
         }
+        (OPERATION_MATMUL_ACT, _) => {
+            let ab = [1.0_f32, -2.0, 3.0, -4.0, 5.0, 6.0, 7.0, 8.0];
+            let (a, b) = ab.split_at(4);
+            let mut reference = [f32::NAN; 4];
+            kernel.run_matmul_act(a, b, &mut reference, 2, 2, 2, 1)?;
+            let mut probe = [f32::INFINITY; 4];
+            for _ in 1..rounds {
+                kernel.run_matmul_act(a, b, &mut probe, 2, 2, 2, 1)?;
+                if reference
+                    .iter()
+                    .zip(probe)
+                    .any(|(left, right)| left.to_bits() != right.to_bits())
+                {
+                    return Err(PluginError::AdmissionOutput);
+                }
+            }
+            Ok(())
+        }
         (OPERATION_XOR_SHIFT_ADD, _) => {
             let input = [0_u64, 1, u64::MAX, 42];
             let mut reference = [0_u64; 4];
@@ -943,6 +1023,60 @@ mod tests {
         0
     }
 
+    unsafe extern "C" fn test_matmul_act_run(context: *mut KernelContext) -> i32 {
+        if context.is_null() {
+            return 1;
+        }
+        // SAFETY: test kernel with the same contract as a validated plugin.
+        let context = unsafe { &mut *context };
+        if context.input.is_null() || context.output.is_null() || context.params.is_null() {
+            return 2;
+        }
+        if context.params_bytes != MATMUL_ACT_PARAMS_BYTES as u64 {
+            return 6;
+        }
+        // SAFETY: params length validated above.
+        let params = unsafe { std::slice::from_raw_parts(context.params, MATMUL_ACT_PARAMS_BYTES) };
+        let m = u32::from_le_bytes([params[0], params[1], params[2], params[3]]) as usize;
+        let k = u32::from_le_bytes([params[4], params[5], params[6], params[7]]) as usize;
+        let n = u32::from_le_bytes([params[8], params[9], params[10], params[11]]) as usize;
+        let activation = u32::from_le_bytes([params[12], params[13], params[14], params[15]]);
+        if activation > MAX_ACTIVATION {
+            return 6;
+        }
+        if m == 0 || k == 0 || n == 0 {
+            return 7;
+        }
+        let input_values = match usize::try_from(context.input_bytes / 4) {
+            Ok(value) => value,
+            Err(_) => return 3,
+        };
+        let output_values = match usize::try_from(context.output_bytes / 4) {
+            Ok(value) => value,
+            Err(_) => return 3,
+        };
+        if input_values != m * k + k * n || output_values != m * n {
+            return 4;
+        }
+        // SAFETY: lengths validated above against the host contract.
+        let input =
+            unsafe { std::slice::from_raw_parts(context.input.cast::<f32>(), input_values) };
+        // SAFETY: lengths validated above against the host contract.
+        let output =
+            unsafe { std::slice::from_raw_parts_mut(context.output.cast::<f32>(), output_values) };
+        let (a, b) = input.split_at(m * k);
+        for row in 0..m {
+            for column in 0..n {
+                let mut sum = 0.0_f32;
+                for inner in 0..k {
+                    sum += a[row * k + inner] * b[inner * n + column];
+                }
+                output[row * n + column] = if activation == 1 { sum.max(0.0) } else { sum };
+            }
+        }
+        0
+    }
+
     fn test_kernel(
         name: &str,
         run: KernelRun,
@@ -1002,6 +1136,20 @@ mod tests {
                             TYPE_U64,
                             TYPE_U64,
                             OPERATION_XOR_SHIFT_ADD,
+                        ),
+                    },
+                },
+                RegistryEntry {
+                    name: "test-matmul-act".to_owned(),
+                    path: std::path::PathBuf::from("test"),
+                    plugin: LoadedPlugin {
+                        _library: None,
+                        kernel: test_kernel(
+                            "test-matmul-act",
+                            test_matmul_act_run,
+                            TYPE_F32,
+                            TYPE_F32,
+                            OPERATION_MATMUL_ACT,
                         ),
                     },
                 },
@@ -1319,7 +1467,7 @@ mod tests {
             Err(PluginError::OperationMismatch)
         ));
         assert!(matches!(
-            registry.run_index(3, &[1.0, 2.0], &mut output),
+            registry.run_index(4, &[1.0, 2.0], &mut output),
             Err(PluginError::NotFound(_))
         ));
     }
@@ -1480,6 +1628,55 @@ mod tests {
             )
             .expect("params byte encoding needs no alignment");
         assert_eq!(output, [0, 0]);
+    }
+
+    #[test]
+    fn run_matmul_act_matches_chained_oracle() {
+        let registry = test_registry();
+        let ab = [
+            -1.0_f32, 2.0, 3.0, -4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ];
+        let (a, b) = ab.split_at(6);
+        let mut fused = [0.0_f32; 4];
+        registry
+            .run_matmul_act("test-matmul-act", a, b, &mut fused, 2, 3, 2, 1)
+            .expect("kernel executes");
+        let mut chained = [0.0_f32; 4];
+        registry
+            .run_matmul("test-matmul", a, b, &mut chained, 2, 3, 2)
+            .expect("kernel executes");
+        for value in &mut chained {
+            *value = value.max(0.0);
+        }
+        assert_eq!(fused, chained);
+    }
+
+    #[test]
+    fn run_matmul_act_rejects_invalid_activation() {
+        let registry = test_registry();
+        let ab = [1.0_f32; 8];
+        let (a, b) = ab.split_at(4);
+        let mut output = [0.0_f32; 4];
+        assert!(matches!(
+            registry.run_matmul_act("test-matmul-act", a, b, &mut output, 2, 2, 2, 2),
+            Err(PluginError::InvalidActivation(2))
+        ));
+    }
+
+    #[test]
+    fn matmul_act_and_matmul_kernels_are_not_interchangeable() {
+        let registry = test_registry();
+        let ab = [1.0_f32; 8];
+        let (a, b) = ab.split_at(4);
+        let mut output = [0.0_f32; 4];
+        assert!(matches!(
+            registry.run_matmul("test-matmul-act", a, b, &mut output, 2, 2, 2),
+            Err(PluginError::OperationMismatch)
+        ));
+        assert!(matches!(
+            registry.run_matmul_act("test-matmul", a, b, &mut output, 2, 2, 2, 1),
+            Err(PluginError::OperationMismatch)
+        ));
     }
 
     #[test]

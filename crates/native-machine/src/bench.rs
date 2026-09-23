@@ -261,6 +261,99 @@ fn bench_resolved_dispatch(
     Ok(())
 }
 
+/// Compares a chained matmul + relu (two dispatches, C round-trips through
+/// memory) against the fused MATMUL_ACT kernel (activation applied to the
+/// accumulators, C written once). Uses a thin-K memory-bound shape where
+/// fusion matters and a compute-bound shape where it should be neutral.
+fn bench_fused_matmul(
+    registry: &PluginRegistry,
+    rows: &mut Vec<Row>,
+) -> Result<(), Box<dyn Error>> {
+    let Some(fused) = ["avx2-fma-matmul-act"]
+        .into_iter()
+        .find(|name| registry.kernel_index(name).is_some())
+    else {
+        return Ok(());
+    };
+    let Some(matmul) = ["avx2-fma-matmul", "neon-matmul", "reference-matmul"]
+        .into_iter()
+        .find(|name| registry.kernel_index(name).is_some())
+    else {
+        return Ok(());
+    };
+    let Some(relu) = ["avx2-relu", "neon-relu", "reference-relu"]
+        .into_iter()
+        .find(|name| registry.kernel_index(name).is_some())
+    else {
+        return Ok(());
+    };
+    for (m, k, n) in [(1024_u32, 8_u32, 1024_u32), (256, 256, 256)] {
+        let a_elements = (m * k) as usize;
+        let c_elements = (m * n) as usize;
+        let mut ab = f32_values(a_elements + (k * n) as usize);
+        for (index, value) in ab.iter_mut().enumerate() {
+            *value = (index % 7) as f32 * 0.25 - 0.75;
+        }
+        let (a, b) = ab.split_at(a_elements);
+        let mut c = vec![0.0_f32; c_elements];
+        let mut c_activated = vec![0.0_f32; c_elements];
+        registry.run_matmul(matmul, a, b, &mut c, m, k, n)?;
+        registry.run_f32(relu, &c, &mut c_activated)?;
+        registry.run_matmul_act(fused, a, b, &mut c_activated, m, k, n, 1)?;
+
+        let failures = Cell::new(0_u64);
+        let (chained_iterations, chained_elapsed) = measure(|| {
+            let first = registry.run_matmul(
+                matmul,
+                black_box(a),
+                black_box(b),
+                black_box(&mut c),
+                m,
+                k,
+                n,
+            );
+            let second = registry.run_f32(relu, black_box(&c), black_box(&mut c_activated));
+            if first.is_err() || second.is_err() {
+                failures.set(failures.get() + 1);
+            }
+        });
+        let (fused_iterations, fused_elapsed) = measure(|| {
+            if registry
+                .run_matmul_act(
+                    fused,
+                    black_box(a),
+                    black_box(b),
+                    black_box(&mut c),
+                    m,
+                    k,
+                    n,
+                    1,
+                )
+                .is_err()
+            {
+                failures.set(failures.get() + 1);
+            }
+        });
+        if failures.get() != 0 {
+            return Err("fused matmul benchmarking failed".into());
+        }
+        let chained_ns = nanos(chained_iterations, chained_elapsed);
+        rows.push(Row {
+            label: format!("matmul+relu chained ({m}x{k}x{n}, {matmul}+{relu})"),
+            elements: u64::from(m) * u64::from(n),
+            native_ns: None,
+            dispatched_ns: chained_ns,
+        });
+        rows.push(Row {
+            label: format!("matmul+relu fused ({m}x{k}x{n}, {fused})"),
+            elements: u64::from(m) * u64::from(n),
+            native_ns: Some(chained_ns),
+            dispatched_ns: nanos(fused_iterations, fused_elapsed),
+        });
+    }
+    Ok(())
+}
+
 fn bench_record_path(registry: &PluginRegistry, rows: &mut Vec<Row>) -> Result<(), Box<dyn Error>> {
     let size = crate::arena::MAX_VALUES;
     let index = registry
@@ -483,13 +576,14 @@ pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
         )?;
     }
     bench_elementwise_f32(&registry, &relu, "relu", 4096, native_relu, &mut rows)?;
-    for dimension in [16, 64, 128, 256] {
+    for dimension in [16, 64, 128, 256, 512] {
         bench_matmul(&registry, &matmul, dimension, &mut rows)?;
     }
     for size in [1, 64, 4096, 65536] {
         bench_xor_shift_add(&registry, &xor_shift_add, size, &mut rows)?;
     }
     bench_resolved_dispatch(&registry, &mut rows)?;
+    bench_fused_matmul(&registry, &mut rows)?;
     bench_record_path(&registry, &mut rows)?;
 
     println!(

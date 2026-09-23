@@ -25,6 +25,10 @@ Included kernels:
   `avx2-matmul`. FMA contraction means results may differ from the scalar
   reference in the last mantissa bit, so its differential tests use exact
   values (bitwise) and a bounded-ULP comparison.
+- `avx2-fma-matmul-act`: fused matmul + activation (`MATMUL_ACT`, params add
+  a `u32` activation: 0 = none, 1 = ReLU). The activation is applied to the
+  accumulators before the single output store, so `C` never round-trips
+  through memory — measurable when the chain is memory-bound (thin `K`).
 
 The `reference-*` crates are the scalar oracles; the `neon-*` crates declare
 the NEON CPU feature bit and the `avx2-*` crates declare the AVX2 bit when
