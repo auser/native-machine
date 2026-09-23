@@ -15,3 +15,7 @@ jobs:
           components: rustfmt, clippy
       - uses: taiki-e/install-action@just
       - run: just ci
+      - name: Build standalone kernels
+        run: just build-kernels
+      - name: Test standalone kernels
+        run: just test-kernels
