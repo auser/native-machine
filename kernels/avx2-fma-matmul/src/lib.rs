@@ -5,12 +5,11 @@
 //! immediately followed by `B`; the dimensions are passed as three
 //! little-endian `u32` values in `params`.
 //!
-//! On x86_64 the kernel uses a 4x8 register-blocked micro-kernel (four
-//! accumulators, one 8-lane vector of `B` per inner step, four broadcasts of
-//! `A`) inside column panels of 64, so one streamed panel of `B` stays
-//! cache-resident for large matrices. Unlike `avx2-matmul`, the inner step
-//! uses fused multiply-add (`_mm256_fmadd_ps`), roughly doubling FLOP
-//! throughput; FMA contraction means results may differ from the scalar
+//! On x86_64 the kernel uses a 4x16 register-blocked AVX2 micro-kernel (eight
+//! accumulators, two 8-lane vectors of `B` and four broadcasts of `A` per
+//! inner step, so the eight FMAs outrun the load ports) inside column panels
+//! of 64, so one streamed panel of `B` stays cache-resident for large
+//! matrices. FMA contraction means results may differ from the scalar
 //! reference in the last mantissa bit, and the descriptor declares both the
 //! AVX2 and FMA3 feature bits so admission rejects the kernel on hosts
 //! without either. The public entry point runtime-detects both features and
@@ -130,8 +129,46 @@ unsafe fn matmul_avx2_fma(a: &[f32], b: &[f32], output: &mut [f32], m: usize, k:
             let mut row = 0;
             while row + 4 <= m {
                 let mut column = panel;
-                // 4x8 micro-kernel: four accumulators, one 8-lane B row
-                // segment per inner step, four A broadcasts, four FMAs.
+                // 4x16 micro-kernel: eight accumulators, two 8-lane B row
+                // segments and four A broadcasts per inner step for eight
+                // FMAs. Two loads per four broadcasts amortize the B stream
+                // across enough FMAs to make the kernel compute-bound.
+                while column + 16 <= panel_end {
+                    let mut c00 = _mm256_set1_ps(0.0);
+                    let mut c01 = _mm256_set1_ps(0.0);
+                    let mut c10 = _mm256_set1_ps(0.0);
+                    let mut c11 = _mm256_set1_ps(0.0);
+                    let mut c20 = _mm256_set1_ps(0.0);
+                    let mut c21 = _mm256_set1_ps(0.0);
+                    let mut c30 = _mm256_set1_ps(0.0);
+                    let mut c31 = _mm256_set1_ps(0.0);
+                    for inner in 0..k {
+                        let b0 = _mm256_loadu_ps(b.as_ptr().add(inner * n + column));
+                        let b1 = _mm256_loadu_ps(b.as_ptr().add(inner * n + column + 8));
+                        let a0 = _mm256_set1_ps(*a.get_unchecked(row * k + inner));
+                        let a1 = _mm256_set1_ps(*a.get_unchecked((row + 1) * k + inner));
+                        let a2 = _mm256_set1_ps(*a.get_unchecked((row + 2) * k + inner));
+                        let a3 = _mm256_set1_ps(*a.get_unchecked((row + 3) * k + inner));
+                        c00 = _mm256_fmadd_ps(a0, b0, c00);
+                        c01 = _mm256_fmadd_ps(a0, b1, c01);
+                        c10 = _mm256_fmadd_ps(a1, b0, c10);
+                        c11 = _mm256_fmadd_ps(a1, b1, c11);
+                        c20 = _mm256_fmadd_ps(a2, b0, c20);
+                        c21 = _mm256_fmadd_ps(a2, b1, c21);
+                        c30 = _mm256_fmadd_ps(a3, b0, c30);
+                        c31 = _mm256_fmadd_ps(a3, b1, c31);
+                    }
+                    _mm256_storeu_ps(output.as_mut_ptr().add(row * n + column), c00);
+                    _mm256_storeu_ps(output.as_mut_ptr().add(row * n + column + 8), c01);
+                    _mm256_storeu_ps(output.as_mut_ptr().add((row + 1) * n + column), c10);
+                    _mm256_storeu_ps(output.as_mut_ptr().add((row + 1) * n + column + 8), c11);
+                    _mm256_storeu_ps(output.as_mut_ptr().add((row + 2) * n + column), c20);
+                    _mm256_storeu_ps(output.as_mut_ptr().add((row + 2) * n + column + 8), c21);
+                    _mm256_storeu_ps(output.as_mut_ptr().add((row + 3) * n + column), c30);
+                    _mm256_storeu_ps(output.as_mut_ptr().add((row + 3) * n + column + 8), c31);
+                    column += 16;
+                }
+                // 4x8 remainder within the panel.
                 while column + 8 <= panel_end {
                     let mut c0 = _mm256_set1_ps(0.0);
                     let mut c1 = _mm256_set1_ps(0.0);

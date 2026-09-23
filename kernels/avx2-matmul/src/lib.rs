@@ -5,14 +5,15 @@
 //! immediately followed by `B`; the dimensions are passed as three
 //! little-endian `u32` values in `params`.
 //!
-//! On x86_64 the kernel uses a 4x8 register-blocked AVX2 micro-kernel (four
-//! accumulators, one 8-lane vector of `B` per inner step, four broadcasts of
-//! `A`) inside column panels of 64, so one streamed panel of `B` stays
-//! cache-resident for large matrices. This vectorizes across columns instead
-//! of reducing along `K` and uses separate multiply and add instructions
-//! (never `_mm256_fmadd_ps`: FMA3 is a separate CPU feature the descriptor
-//! does not declare), so there is no FMA contraction and results match the
-//! scalar reference bitwise. The public entry point runtime-detects AVX2 via
+//! On x86_64 the kernel uses a 4x16 register-blocked AVX2 micro-kernel (eight
+//! accumulators, two 8-lane vectors of `B` and four broadcasts of `A` per
+//! inner step, so the eight mul+add pairs outrun the load ports) inside
+//! column panels of 64, so one streamed panel of `B` stays cache-resident
+//! for large matrices. This vectorizes across columns instead of reducing
+//! along `K` and uses separate multiply and add instructions (never
+//! `_mm256_fmadd_ps`: FMA3 is a separate CPU feature the descriptor does not
+//! declare), so there is no FMA contraction and results match the scalar
+//! reference bitwise. The public entry point runtime-detects AVX2 via
 //! `is_x86_feature_detected!` and falls back to the scalar path when the
 //! feature is absent, so the unit tests are safe on any host. Other targets
 //! use the scalar fallback unconditionally. The kernel performs no heap
@@ -127,8 +128,46 @@ unsafe fn matmul_avx2(a: &[f32], b: &[f32], output: &mut [f32], m: usize, k: usi
             let mut row = 0;
             while row + 4 <= m {
                 let mut column = panel;
-                // 4x8 micro-kernel: four accumulators, one 8-lane B row
-                // segment per inner step, four A broadcasts, four mul+adds.
+                // 4x16 micro-kernel: eight accumulators, two 8-lane B row
+                // segments and four A broadcasts per inner step for eight
+                // mul+add pairs. Two loads per four broadcasts amortize the B
+                // stream across enough arithmetic to leave the load ports.
+                while column + 16 <= panel_end {
+                    let mut c00 = _mm256_set1_ps(0.0);
+                    let mut c01 = _mm256_set1_ps(0.0);
+                    let mut c10 = _mm256_set1_ps(0.0);
+                    let mut c11 = _mm256_set1_ps(0.0);
+                    let mut c20 = _mm256_set1_ps(0.0);
+                    let mut c21 = _mm256_set1_ps(0.0);
+                    let mut c30 = _mm256_set1_ps(0.0);
+                    let mut c31 = _mm256_set1_ps(0.0);
+                    for inner in 0..k {
+                        let b0 = _mm256_loadu_ps(b.as_ptr().add(inner * n + column));
+                        let b1 = _mm256_loadu_ps(b.as_ptr().add(inner * n + column + 8));
+                        let a0 = _mm256_set1_ps(*a.get_unchecked(row * k + inner));
+                        let a1 = _mm256_set1_ps(*a.get_unchecked((row + 1) * k + inner));
+                        let a2 = _mm256_set1_ps(*a.get_unchecked((row + 2) * k + inner));
+                        let a3 = _mm256_set1_ps(*a.get_unchecked((row + 3) * k + inner));
+                        c00 = _mm256_add_ps(c00, _mm256_mul_ps(a0, b0));
+                        c01 = _mm256_add_ps(c01, _mm256_mul_ps(a0, b1));
+                        c10 = _mm256_add_ps(c10, _mm256_mul_ps(a1, b0));
+                        c11 = _mm256_add_ps(c11, _mm256_mul_ps(a1, b1));
+                        c20 = _mm256_add_ps(c20, _mm256_mul_ps(a2, b0));
+                        c21 = _mm256_add_ps(c21, _mm256_mul_ps(a2, b1));
+                        c30 = _mm256_add_ps(c30, _mm256_mul_ps(a3, b0));
+                        c31 = _mm256_add_ps(c31, _mm256_mul_ps(a3, b1));
+                    }
+                    _mm256_storeu_ps(output.as_mut_ptr().add(row * n + column), c00);
+                    _mm256_storeu_ps(output.as_mut_ptr().add(row * n + column + 8), c01);
+                    _mm256_storeu_ps(output.as_mut_ptr().add((row + 1) * n + column), c10);
+                    _mm256_storeu_ps(output.as_mut_ptr().add((row + 1) * n + column + 8), c11);
+                    _mm256_storeu_ps(output.as_mut_ptr().add((row + 2) * n + column), c20);
+                    _mm256_storeu_ps(output.as_mut_ptr().add((row + 2) * n + column + 8), c21);
+                    _mm256_storeu_ps(output.as_mut_ptr().add((row + 3) * n + column), c30);
+                    _mm256_storeu_ps(output.as_mut_ptr().add((row + 3) * n + column + 8), c31);
+                    column += 16;
+                }
+                // 4x8 remainder within the panel.
                 while column + 8 <= panel_end {
                     let mut c0 = _mm256_set1_ps(0.0);
                     let mut c1 = _mm256_set1_ps(0.0);
