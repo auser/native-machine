@@ -15,6 +15,7 @@ use std::ffi::c_char;
 pub const ABI_VERSION: u32 = 3;
 const TYPE_U64: u16 = 2;
 const OPERATION_XOR_SHIFT_ADD: u16 = 3;
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 const CPU_NEON: u64 = 2;
 
 /// Largest accepted shift; `shift` must be in `0..=MAX_SHIFT`.

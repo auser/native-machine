@@ -21,6 +21,7 @@ use std::ffi::c_char;
 pub const ABI_VERSION: u32 = 3;
 const TYPE_F32: u16 = 1;
 const OPERATION_MATMUL: u16 = 2;
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 const CPU_NEON: u64 = 2;
 
 #[cfg(target_arch = "aarch64")]
