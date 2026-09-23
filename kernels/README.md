@@ -20,6 +20,11 @@ Included kernels:
   elsewhere, so they build and pass tests on any host). `avx2-matmul` uses a
   4x8 micro-kernel with separate mul+add (no FMA3 dependency), so it matches
   the scalar reference bitwise.
+- `avx2-fma-matmul`: the same matmul contract with fused multiply-add on
+  x86_64 hosts with AVX2 and FMA3, roughly doubling FLOP throughput over
+  `avx2-matmul`. FMA contraction means results may differ from the scalar
+  reference in the last mantissa bit, so its differential tests use exact
+  values (bitwise) and a bounded-ULP comparison.
 
 The `reference-*` crates are the scalar oracles; the `neon-*` crates declare
 the NEON CPU feature bit and the `avx2-*` crates declare the AVX2 bit when

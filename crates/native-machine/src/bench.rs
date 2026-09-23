@@ -379,10 +379,15 @@ fn measure_dispatch_allocations(registry: &PluginRegistry) -> Result<usize, Box<
         .iter()
         .filter_map(|name| registry.resolve(name).ok())
         .collect();
-    let matmul_handles: Vec<_> = ["reference-matmul", "neon-matmul", "avx2-matmul"]
-        .iter()
-        .filter_map(|name| registry.resolve(name).ok())
-        .collect();
+    let matmul_handles: Vec<_> = [
+        "reference-matmul",
+        "neon-matmul",
+        "avx2-matmul",
+        "avx2-fma-matmul",
+    ]
+    .iter()
+    .filter_map(|name| registry.resolve(name).ok())
+    .collect();
     let u64_handles: Vec<_> = [
         "reference-xor-shift-add",
         "neon-xor-shift-add",
@@ -436,10 +441,11 @@ pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
 
     let features = crate::cpu::features();
     println!(
-        "native-machine kernel benchmarks\nhost: {} (avx2: {}, neon: {})\nmeasurement budget: {:?} per row",
+        "native-machine kernel benchmarks\nhost: {} (avx2: {}, neon: {}, fma: {})\nmeasurement budget: {:?} per row",
         std::env::consts::ARCH,
         features.avx2,
         features.neon,
+        features.fma,
         MEASUREMENT_BUDGET
     );
 
@@ -451,7 +457,12 @@ pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     let relu = installed_kernels(&registry, &["reference-relu", "neon-relu", "avx2-relu"]);
     let matmul = installed_kernels(
         &registry,
-        &["reference-matmul", "neon-matmul", "avx2-matmul"],
+        &[
+            "reference-matmul",
+            "neon-matmul",
+            "avx2-matmul",
+            "avx2-fma-matmul",
+        ],
     );
     let xor_shift_add = installed_kernels(
         &registry,

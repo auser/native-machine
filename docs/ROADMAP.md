@@ -46,6 +46,7 @@
 - [x] zero-allocation typed dispatch test
 - [x] NEON kernel tier with descriptor-declared CPU feature floor
 - [x] AVX2 kernel tier with runtime detection and scalar fallback
+- [x] AVX2+FMA3 matmul tier with descriptor-declared FMA feature floor
 - [x] SIMD differential tests (NEON vs scalar reference oracles)
 - [x] resolve-once kernel handles for hot-loop dispatch
 - [ ] one-time scalar/NEON/AVX2/VNNI dispatch in built-in operations

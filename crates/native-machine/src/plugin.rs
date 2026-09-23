@@ -20,6 +20,7 @@ pub const MAX_SHIFT: u32 = 63;
 
 const CPU_AVX2: u64 = 1;
 const CPU_NEON: u64 = 2;
+const CPU_FMA: u64 = 4;
 const ENTRY_SYMBOL: &[u8] = b"hologram_kernel_plugin_v3\0";
 const LEGACY_ENTRY_SYMBOL: &[u8] = b"hologram_kernel_plugin_v2\0";
 const MANIFEST_SUFFIX: &str = ".manifest.toml";
@@ -526,7 +527,9 @@ fn check_descriptor(descriptor: &KernelPlugin) -> Result<(), PluginError> {
         return Err(PluginError::ScratchBytes(descriptor.scratch_bytes));
     }
     let features = crate::cpu::features();
-    let available = u64::from(features.avx2) * CPU_AVX2 + u64::from(features.neon) * CPU_NEON;
+    let available = u64::from(features.avx2) * CPU_AVX2
+        + u64::from(features.neon) * CPU_NEON
+        + u64::from(features.fma) * CPU_FMA;
     if descriptor.cpu_features & !available != 0 {
         return Err(PluginError::CpuFeatures(descriptor.cpu_features));
     }

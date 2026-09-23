@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 pub struct CpuFeatures {
     pub avx2: bool,
     pub neon: bool,
+    pub fma: bool,
 }
 
 static FEATURES: OnceLock<CpuFeatures> = OnceLock::new();
@@ -18,6 +19,7 @@ fn detect() -> CpuFeatures {
     CpuFeatures {
         avx2: detect_avx2(),
         neon: detect_neon(),
+        fma: detect_fma(),
     }
 }
 
@@ -38,6 +40,17 @@ fn detect_neon() -> bool {
 
 #[cfg(not(target_arch = "aarch64"))]
 fn detect_neon() -> bool {
+    false
+}
+
+/// FMA3 (x86) only; AArch64 fused multiply-add is covered by the NEON bit.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn detect_fma() -> bool {
+    std::arch::is_x86_feature_detected!("fma")
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+fn detect_fma() -> bool {
     false
 }
 
