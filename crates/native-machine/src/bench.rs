@@ -218,6 +218,49 @@ fn bench_xor_shift_add(
     Ok(())
 }
 
+fn bench_resolved_dispatch(
+    registry: &PluginRegistry,
+    rows: &mut Vec<Row>,
+) -> Result<(), Box<dyn Error>> {
+    let kernel = ["neon-add-one", "reference-add-one"]
+        .into_iter()
+        .find(|name| registry.kernel_index(name).is_some())
+        .ok_or("no add-one kernel is installed")?;
+    let handle = registry.resolve(kernel)?;
+    for size in [1, 64] {
+        let input = f32_values(size);
+        let mut output = vec![0.0_f32; size];
+        registry.run_f32(kernel, &input, &mut output)?;
+        let failures = Cell::new(0_u64);
+        let (named_iterations, named_elapsed) = measure(|| {
+            if registry
+                .run_f32(kernel, black_box(&input), black_box(&mut output))
+                .is_err()
+            {
+                failures.set(failures.get() + 1);
+            }
+        });
+        let (resolved_iterations, resolved_elapsed) = measure(|| {
+            if registry
+                .run_f32_resolved(handle, black_box(&input), black_box(&mut output))
+                .is_err()
+            {
+                failures.set(failures.get() + 1);
+            }
+        });
+        if failures.get() != 0 {
+            return Err(format!("kernel {kernel} failed during benchmarking").into());
+        }
+        rows.push(Row {
+            label: format!("add-one ({size} f32) via {kernel} (resolved handle)"),
+            elements: size as u64,
+            native_ns: Some(nanos(named_iterations, named_elapsed)),
+            dispatched_ns: nanos(resolved_iterations, resolved_elapsed),
+        });
+    }
+    Ok(())
+}
+
 fn bench_record_path(registry: &PluginRegistry, rows: &mut Vec<Row>) -> Result<(), Box<dyn Error>> {
     let size = crate::arena::MAX_VALUES;
     let index = registry
@@ -330,22 +373,34 @@ fn measure_dispatch_allocations(registry: &PluginRegistry) -> Result<usize, Box<
     let mut c = vec![0.0_f32; 4];
     let words: Vec<u64> = (0..64).map(|index| index as u64).collect();
     let mut words_output = vec![0_u64; 64];
+    // Resolve every installed kernel once, then dispatch by handle: this is
+    // the intended hot-loop pattern.
+    let f32_handles: Vec<_> = ["reference-add-one", "neon-add-one", "avx2-add-one"]
+        .iter()
+        .filter_map(|name| registry.resolve(name).ok())
+        .collect();
+    let matmul_handles: Vec<_> = ["reference-matmul", "neon-matmul", "avx2-matmul"]
+        .iter()
+        .filter_map(|name| registry.resolve(name).ok())
+        .collect();
+    let u64_handles: Vec<_> = [
+        "reference-xor-shift-add",
+        "neon-xor-shift-add",
+        "avx2-xor-shift-add",
+    ]
+    .iter()
+    .filter_map(|name| registry.resolve(name).ok())
+    .collect();
     let tracking = crate::allocation::track();
     for _ in 0..ALLOCATION_DISPATCHES {
-        for kernel in ["reference-add-one", "neon-add-one"] {
-            if registry.kernel_index(kernel).is_some() {
-                registry.run_f32(kernel, &input, &mut output)?;
-            }
+        for handle in &f32_handles {
+            registry.run_f32_resolved(*handle, &input, &mut output)?;
         }
-        for kernel in ["reference-matmul", "neon-matmul"] {
-            if registry.kernel_index(kernel).is_some() {
-                registry.run_matmul(kernel, a, b, &mut c, 2, 2, 2)?;
-            }
+        for handle in &matmul_handles {
+            registry.run_matmul_resolved(*handle, a, b, &mut c, 2, 2, 2)?;
         }
-        for kernel in ["reference-xor-shift-add", "neon-xor-shift-add"] {
-            if registry.kernel_index(kernel).is_some() {
-                registry.run_u64(kernel, &words, &mut words_output, 13, 7)?;
-            }
+        for handle in &u64_handles {
+            registry.run_u64_resolved(*handle, &words, &mut words_output, 13, 7)?;
         }
     }
     let allocations = tracking.count();
@@ -389,14 +444,24 @@ pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     );
 
     let mut rows = Vec::new();
-    let add_one = installed_kernels(&registry, &["reference-add-one", "neon-add-one"]);
-    let relu = installed_kernels(&registry, &["reference-relu", "neon-relu"]);
-    let matmul = installed_kernels(&registry, &["reference-matmul", "neon-matmul"]);
+    let add_one = installed_kernels(
+        &registry,
+        &["reference-add-one", "neon-add-one", "avx2-add-one"],
+    );
+    let relu = installed_kernels(&registry, &["reference-relu", "neon-relu", "avx2-relu"]);
+    let matmul = installed_kernels(
+        &registry,
+        &["reference-matmul", "neon-matmul", "avx2-matmul"],
+    );
     let xor_shift_add = installed_kernels(
         &registry,
-        &["reference-xor-shift-add", "neon-xor-shift-add"],
+        &[
+            "reference-xor-shift-add",
+            "neon-xor-shift-add",
+            "avx2-xor-shift-add",
+        ],
     );
-    for size in [1, 64, 4096] {
+    for size in [1, 64, 4096, 65536, 1048576] {
         bench_elementwise_f32(
             &registry,
             &add_one,
@@ -407,12 +472,13 @@ pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
         )?;
     }
     bench_elementwise_f32(&registry, &relu, "relu", 4096, native_relu, &mut rows)?;
-    for dimension in [16, 32, 64] {
+    for dimension in [16, 64, 128, 256] {
         bench_matmul(&registry, &matmul, dimension, &mut rows)?;
     }
-    for size in [1, 64, 4096] {
+    for size in [1, 64, 4096, 65536] {
         bench_xor_shift_add(&registry, &xor_shift_add, size, &mut rows)?;
     }
+    bench_resolved_dispatch(&registry, &mut rows)?;
     bench_record_path(&registry, &mut rows)?;
 
     println!(

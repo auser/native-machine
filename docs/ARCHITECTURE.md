@@ -64,13 +64,23 @@ Four standalone kernels under `kernels/` implement ABI v3: add-one and ReLU
 (elementwise `f32`), matmul (`f32`), and xor-shift-add (`u64`).
 
 Alongside them, `neon-*` crates implement the same contracts with
-NEON-accelerated hot loops on AArch64 (scalar fallback elsewhere). Their
-descriptors declare the NEON CPU feature bit, so the admission feature floor
-rejects them on hosts without NEON. Differential tests prove them against the
-reference oracles: bitwise for exact operations, bounded-ULP for matmul,
-whose FMA contraction may differ from the scalar reference in the last
-mantissa bit. `neon-matmul` uses a 4x4 register-blocked micro-kernel that
-vectorizes across columns instead of reducing along `K`.
+NEON-accelerated hot loops on AArch64 (scalar fallback elsewhere), and
+`avx2-*` crates add an AVX2 tier on x86_64 with runtime detection and scalar
+fallback elsewhere, so every crate builds and passes its tests on any host.
+SIMD descriptors declare their feature bit (NEON or AVX2) when compiled for
+the matching architecture, so the admission feature floor rejects a compiled
+SIMD kernel on hosts without the feature. Differential tests prove the SIMD
+tiers against the reference oracles: bitwise for exact operations,
+bounded-ULP for `neon-matmul`, whose FMA contraction may differ from the
+scalar reference in the last mantissa bit. `neon-matmul` uses a 4x8
+register-blocked micro-kernel inside 64-column panels, vectorizing across
+columns instead of reducing along `K`; `avx2-matmul` uses separate mul+add
+(no FMA3) and matches the reference bitwise.
+
+Callers that dispatch the same kernel repeatedly can resolve the name once
+with `PluginRegistry::resolve` and dispatch through the returned
+`KernelHandle`, skipping the per-call name lookup while keeping full
+contract validation.
 
 Matmul is deliberately a scalar, deterministic triple loop. It is not O(1):
 `C[M,N] = A[M,K] x B[K,N]` costs `M*N*K` multiply-adds, so no constant-time

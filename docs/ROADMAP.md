@@ -45,7 +45,9 @@
 - [x] alignment and feature-floor validation
 - [x] zero-allocation typed dispatch test
 - [x] NEON kernel tier with descriptor-declared CPU feature floor
+- [x] AVX2 kernel tier with runtime detection and scalar fallback
 - [x] SIMD differential tests (NEON vs scalar reference oracles)
+- [x] resolve-once kernel handles for hot-loop dispatch
 - [ ] one-time scalar/NEON/AVX2/VNNI dispatch in built-in operations
 - [x] kernel head-to-head benchmarks (`just bench`, native baseline ratios)
 

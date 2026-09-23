@@ -13,12 +13,20 @@ Included kernels:
   (`u64`, wrapping)
 - `neon-add-one`, `neon-relu`, `neon-matmul`, `neon-xor-shift-add`: the same
   contracts with NEON-accelerated hot loops on AArch64 (scalar fallback
-  elsewhere). `neon-matmul` uses a 4x4 register-blocked FMA micro-kernel.
+  elsewhere). `neon-matmul` uses a 4x8 register-blocked FMA micro-kernel
+  inside 64-column panels.
+- `avx2-add-one`, `avx2-relu`, `avx2-matmul`, `avx2-xor-shift-add`: the same
+  contracts with an AVX2 tier on x86_64 (runtime-detected, scalar fallback
+  elsewhere, so they build and pass tests on any host). `avx2-matmul` uses a
+  4x8 micro-kernel with separate mul+add (no FMA3 dependency), so it matches
+  the scalar reference bitwise.
 
 The `reference-*` crates are the scalar oracles; the `neon-*` crates declare
-the NEON CPU feature bit in their descriptors and prove equivalence with
-differential tests against the reference crates (bitwise where the operation
-is exact, bounded-ULP where FMA contraction applies).
+the NEON CPU feature bit and the `avx2-*` crates declare the AVX2 bit when
+compiled for their target architecture, so the admission feature floor
+rejects a compiled SIMD kernel on hosts without the feature. Differential
+tests prove the SIMD tiers against the reference crates (bitwise where the
+operation is exact, bounded-ULP where FMA contraction applies).
 
 Build every kernel from the repository root:
 

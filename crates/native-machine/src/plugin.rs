@@ -223,12 +223,33 @@ pub fn load_registry(config: &Config) -> Result<PluginRegistry, PluginError> {
     Ok(PluginRegistry { entries })
 }
 
+/// A kernel name resolved once against a registry, skipping the name lookup
+/// on every dispatch. Handles are only valid for the registry that produced
+/// them.
+#[derive(Clone, Copy, Debug)]
+pub struct KernelHandle {
+    index: usize,
+}
+
 impl PluginRegistry {
     fn kernel(&self, name: &str) -> Result<&LoadedKernel, PluginError> {
         self.entries
             .iter()
             .find(|entry| entry.name == name)
             .map(|entry| &entry.plugin.kernel)
+            .ok_or_else(|| PluginError::NotFound(name.to_owned()))
+    }
+
+    fn kernel_at(&self, handle: KernelHandle) -> Result<&LoadedKernel, PluginError> {
+        self.entries
+            .get(handle.index)
+            .map(|entry| &entry.plugin.kernel)
+            .ok_or_else(|| PluginError::NotFound(handle.index.to_string()))
+    }
+
+    pub fn resolve(&self, name: &str) -> Result<KernelHandle, PluginError> {
+        self.kernel_index(name)
+            .map(|index| KernelHandle { index })
             .ok_or_else(|| PluginError::NotFound(name.to_owned()))
     }
 
@@ -268,6 +289,40 @@ impl PluginRegistry {
         add: u64,
     ) -> Result<(), PluginError> {
         self.kernel(name)?.run_u64(input, output, shift, add)
+    }
+
+    pub fn run_f32_resolved(
+        &self,
+        handle: KernelHandle,
+        input: &[f32],
+        output: &mut [f32],
+    ) -> Result<(), PluginError> {
+        self.kernel_at(handle)?.run_f32(input, output)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_matmul_resolved(
+        &self,
+        handle: KernelHandle,
+        a: &[f32],
+        b: &[f32],
+        output: &mut [f32],
+        m: u32,
+        k: u32,
+        n: u32,
+    ) -> Result<(), PluginError> {
+        self.kernel_at(handle)?.run_matmul(a, b, output, m, k, n)
+    }
+
+    pub fn run_u64_resolved(
+        &self,
+        handle: KernelHandle,
+        input: &[u64],
+        output: &mut [u64],
+        shift: u32,
+        add: u64,
+    ) -> Result<(), PluginError> {
+        self.kernel_at(handle)?.run_u64(input, output, shift, add)
     }
 
     pub fn run_index(
@@ -1319,6 +1374,84 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn resolved_handle_dispatches_without_name_lookup() {
+        let registry = test_registry();
+        let handle = registry
+            .resolve("test-elementwise")
+            .expect("kernel resolves");
+        let mut output = [0.0_f32; 2];
+        registry
+            .run_f32_resolved(handle, &[1.0, 2.0], &mut output)
+            .expect("kernel executes");
+        assert_eq!(output, [2.0, 3.0]);
+    }
+
+    #[test]
+    fn resolve_rejects_unknown_kernel() {
+        let registry = test_registry();
+        assert!(matches!(
+            registry.resolve("missing"),
+            Err(PluginError::NotFound(name)) if name == "missing"
+        ));
+    }
+
+    #[test]
+    fn resolved_handle_still_validates_operation_kind() {
+        let registry = test_registry();
+        let handle = registry.resolve("test-matmul").expect("kernel resolves");
+        let mut output = [0.0_f32; 2];
+        assert!(matches!(
+            registry.run_f32_resolved(handle, &[1.0, 2.0], &mut output),
+            Err(PluginError::OperationMismatch)
+        ));
+    }
+
+    #[test]
+    fn stale_handle_is_rejected() {
+        let registry = PluginRegistry {
+            entries: Vec::new(),
+        };
+        let handle = KernelHandle { index: 7 };
+        let mut output = [0.0_f32; 1];
+        assert!(matches!(
+            registry.run_f32_resolved(handle, &[1.0], &mut output),
+            Err(PluginError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn resolved_dispatch_does_not_allocate_on_success() {
+        let registry = test_registry();
+        let elementwise = registry
+            .resolve("test-elementwise")
+            .expect("kernel resolves");
+        let matmul = registry.resolve("test-matmul").expect("kernel resolves");
+        let xor = registry
+            .resolve("test-xor-shift-add")
+            .expect("kernel resolves");
+        let input = [1.0_f32, 2.0, 3.0, 4.0];
+        let mut output = [0.0_f32; 4];
+        let ab = [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let (a, b) = ab.split_at(4);
+        let mut c = [0.0_f32; 4];
+        let words = [1_u64, 2, 3, 4];
+        let mut words_output = [0_u64; 4];
+        let tracking = crate::allocation::track();
+        registry
+            .run_f32_resolved(elementwise, &input, &mut output)
+            .expect("kernel executes");
+        registry
+            .run_matmul_resolved(matmul, a, b, &mut c, 2, 2, 2)
+            .expect("kernel executes");
+        registry
+            .run_u64_resolved(xor, &words, &mut words_output, 5, 3)
+            .expect("kernel executes");
+        let allocations = tracking.count();
+        drop(tracking);
+        assert_eq!(allocations, 0);
     }
 
     #[test]

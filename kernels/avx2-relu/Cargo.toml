@@ -1,0 +1,16 @@
+[package]
+name = "avx2-relu"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dev-dependencies]
+reference-relu = { path = "../reference-relu" }
+
+[profile.release]
+panic = "abort"

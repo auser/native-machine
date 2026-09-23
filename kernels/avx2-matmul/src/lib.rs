@@ -1,18 +1,22 @@
-//! NEON matmul kernel implementing the Native Machine ABI v3.
+//! AVX2 matmul kernel implementing the Native Machine ABI v3.
 //!
 //! Contract: `C[M,N] = A[M,K] x B[K,N]` over row-major contiguous `f32`
 //! buffers, matching `reference-matmul`. The input region holds `A`
 //! immediately followed by `B`; the dimensions are passed as three
 //! little-endian `u32` values in `params`.
 //!
-//! On AArch64 the kernel uses a 4x8 register-blocked NEON micro-kernel (eight
-//! accumulators, two vectors of `B` per inner step) inside column panels of
-//! 64, so one streamed panel of `B` stays cache-resident for large matrices.
-//! This vectorizes across columns instead of reducing along `K` and uses
-//! fused multiply-add, so results may differ from the scalar reference in the
-//! last mantissa bit; the reference kernel remains the oracle. Other targets
-//! use the scalar fallback. The kernel performs no heap allocation, hidden
-//! copies, or layout conversion.
+//! On x86_64 the kernel uses a 4x8 register-blocked AVX2 micro-kernel (four
+//! accumulators, one 8-lane vector of `B` per inner step, four broadcasts of
+//! `A`) inside column panels of 64, so one streamed panel of `B` stays
+//! cache-resident for large matrices. This vectorizes across columns instead
+//! of reducing along `K` and uses separate multiply and add instructions
+//! (never `_mm256_fmadd_ps`: FMA3 is a separate CPU feature the descriptor
+//! does not declare), so there is no FMA contraction and results match the
+//! scalar reference bitwise. The public entry point runtime-detects AVX2 via
+//! `is_x86_feature_detected!` and falls back to the scalar path when the
+//! feature is absent, so the unit tests are safe on any host. Other targets
+//! use the scalar fallback unconditionally. The kernel performs no heap
+//! allocation, hidden copies, or layout conversion.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -21,11 +25,12 @@ use std::ffi::c_char;
 pub const ABI_VERSION: u32 = 3;
 const TYPE_F32: u16 = 1;
 const OPERATION_MATMUL: u16 = 2;
-const CPU_NEON: u64 = 2;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+const CPU_AVX2: u64 = 1;
 
-#[cfg(target_arch = "aarch64")]
-const REQUIRED_FEATURES: u64 = CPU_NEON;
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(target_arch = "x86_64")]
+const REQUIRED_FEATURES: u64 = CPU_AVX2;
+#[cfg(not(target_arch = "x86_64"))]
 const REQUIRED_FEATURES: u64 = 0;
 
 const STATUS_OK: i32 = 0;
@@ -83,29 +88,38 @@ pub fn matmul_scalar(a: &[f32], b: &[f32], output: &mut [f32], m: usize, k: usiz
     }
 }
 
-/// `C[M,N] = A[M,K] x B[K,N]`, NEON register-blocked on AArch64.
+/// `C[M,N] = A[M,K] x B[K,N]`, AVX2 register-blocked on x86_64.
 pub fn matmul(a: &[f32], b: &[f32], output: &mut [f32], m: usize, k: usize, n: usize) {
-    #[cfg(target_arch = "aarch64")]
-    matmul_neon(a, b, output, m, k, n);
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 was just detected at runtime, so the target-feature
+            // contract of `matmul_avx2` is satisfied.
+            unsafe { matmul_avx2(a, b, output, m, k, n) };
+            return;
+        }
+    }
     matmul_scalar(a, b, output, m, k, n);
 }
 
 /// Columns processed per panel; keeps one streamed panel of `B` cache-resident
 /// for large matrices.
-#[cfg(target_arch = "aarch64")]
+#[cfg(target_arch = "x86_64")]
 const COLUMN_PANEL: usize = 64;
 
-#[cfg(target_arch = "aarch64")]
-fn matmul_neon(a: &[f32], b: &[f32], output: &mut [f32], m: usize, k: usize, n: usize) {
-    use std::arch::aarch64::{vdupq_n_f32, vfmaq_f32, vld1q_f32, vst1q_f32};
-    // SAFETY: NEON is mandatory on AArch64, so the target-feature contract of
-    // every intrinsic used here is satisfied. Every load from `b` reads four
-    // or eight lanes starting at inner * n + column, with the column bound
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn matmul_avx2(a: &[f32], b: &[f32], output: &mut [f32], m: usize, k: usize, n: usize) {
+    use std::arch::x86_64::{
+        _mm256_add_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_storeu_ps,
+    };
+    // SAFETY: the caller detected AVX2 at runtime, so the target-feature
+    // contract of every intrinsic used here is satisfied. Every load from `b`
+    // reads eight lanes starting at inner * n + column, with the column bound
     // checked against the panel end (<= n) and inner < k, staying within
     // b.len() == k * n; every store stays within output.len() == m * n; every
     // `get_unchecked` on `a` stays below a.len() == m * k because row < m and
-    // inner < k. NEON accesses do not require alignment.
+    // inner < k. The unaligned load/store intrinsics do not require alignment.
     unsafe {
         let mut panel = 0;
         while panel < n {
@@ -113,73 +127,29 @@ fn matmul_neon(a: &[f32], b: &[f32], output: &mut [f32], m: usize, k: usize, n: 
             let mut row = 0;
             while row + 4 <= m {
                 let mut column = panel;
-                // 4x8 micro-kernel: eight accumulators, one B row segment
-                // (two vectors) per inner step, four A broadcasts, eight FMAs.
+                // 4x8 micro-kernel: four accumulators, one 8-lane B row
+                // segment per inner step, four A broadcasts, four mul+adds.
                 while column + 8 <= panel_end {
-                    let mut c00 = vdupq_n_f32(0.0);
-                    let mut c01 = vdupq_n_f32(0.0);
-                    let mut c10 = vdupq_n_f32(0.0);
-                    let mut c11 = vdupq_n_f32(0.0);
-                    let mut c20 = vdupq_n_f32(0.0);
-                    let mut c21 = vdupq_n_f32(0.0);
-                    let mut c30 = vdupq_n_f32(0.0);
-                    let mut c31 = vdupq_n_f32(0.0);
+                    let mut c0 = _mm256_set1_ps(0.0);
+                    let mut c1 = _mm256_set1_ps(0.0);
+                    let mut c2 = _mm256_set1_ps(0.0);
+                    let mut c3 = _mm256_set1_ps(0.0);
                     for inner in 0..k {
-                        let b0 = vld1q_f32(b.as_ptr().add(inner * n + column));
-                        let b1 = vld1q_f32(b.as_ptr().add(inner * n + column + 4));
-                        let a0 = vdupq_n_f32(*a.get_unchecked(row * k + inner));
-                        let a1 = vdupq_n_f32(*a.get_unchecked((row + 1) * k + inner));
-                        let a2 = vdupq_n_f32(*a.get_unchecked((row + 2) * k + inner));
-                        let a3 = vdupq_n_f32(*a.get_unchecked((row + 3) * k + inner));
-                        c00 = vfmaq_f32(c00, a0, b0);
-                        c01 = vfmaq_f32(c01, a0, b1);
-                        c10 = vfmaq_f32(c10, a1, b0);
-                        c11 = vfmaq_f32(c11, a1, b1);
-                        c20 = vfmaq_f32(c20, a2, b0);
-                        c21 = vfmaq_f32(c21, a2, b1);
-                        c30 = vfmaq_f32(c30, a3, b0);
-                        c31 = vfmaq_f32(c31, a3, b1);
+                        let b_row = _mm256_loadu_ps(b.as_ptr().add(inner * n + column));
+                        let a0 = _mm256_set1_ps(*a.get_unchecked(row * k + inner));
+                        let a1 = _mm256_set1_ps(*a.get_unchecked((row + 1) * k + inner));
+                        let a2 = _mm256_set1_ps(*a.get_unchecked((row + 2) * k + inner));
+                        let a3 = _mm256_set1_ps(*a.get_unchecked((row + 3) * k + inner));
+                        c0 = _mm256_add_ps(c0, _mm256_mul_ps(a0, b_row));
+                        c1 = _mm256_add_ps(c1, _mm256_mul_ps(a1, b_row));
+                        c2 = _mm256_add_ps(c2, _mm256_mul_ps(a2, b_row));
+                        c3 = _mm256_add_ps(c3, _mm256_mul_ps(a3, b_row));
                     }
-                    vst1q_f32(output.as_mut_ptr().add(row * n + column), c00);
-                    vst1q_f32(output.as_mut_ptr().add(row * n + column + 4), c01);
-                    vst1q_f32(output.as_mut_ptr().add((row + 1) * n + column), c10);
-                    vst1q_f32(output.as_mut_ptr().add((row + 1) * n + column + 4), c11);
-                    vst1q_f32(output.as_mut_ptr().add((row + 2) * n + column), c20);
-                    vst1q_f32(output.as_mut_ptr().add((row + 2) * n + column + 4), c21);
-                    vst1q_f32(output.as_mut_ptr().add((row + 3) * n + column), c30);
-                    vst1q_f32(output.as_mut_ptr().add((row + 3) * n + column + 4), c31);
+                    _mm256_storeu_ps(output.as_mut_ptr().add(row * n + column), c0);
+                    _mm256_storeu_ps(output.as_mut_ptr().add((row + 1) * n + column), c1);
+                    _mm256_storeu_ps(output.as_mut_ptr().add((row + 2) * n + column), c2);
+                    _mm256_storeu_ps(output.as_mut_ptr().add((row + 3) * n + column), c3);
                     column += 8;
-                }
-                // 4x4 remainder within the panel.
-                while column + 4 <= panel_end {
-                    let mut c0 = vdupq_n_f32(0.0);
-                    let mut c1 = vdupq_n_f32(0.0);
-                    let mut c2 = vdupq_n_f32(0.0);
-                    let mut c3 = vdupq_n_f32(0.0);
-                    for inner in 0..k {
-                        let b_row = vld1q_f32(b.as_ptr().add(inner * n + column));
-                        c0 = vfmaq_f32(c0, vdupq_n_f32(*a.get_unchecked(row * k + inner)), b_row);
-                        c1 = vfmaq_f32(
-                            c1,
-                            vdupq_n_f32(*a.get_unchecked((row + 1) * k + inner)),
-                            b_row,
-                        );
-                        c2 = vfmaq_f32(
-                            c2,
-                            vdupq_n_f32(*a.get_unchecked((row + 2) * k + inner)),
-                            b_row,
-                        );
-                        c3 = vfmaq_f32(
-                            c3,
-                            vdupq_n_f32(*a.get_unchecked((row + 3) * k + inner)),
-                            b_row,
-                        );
-                    }
-                    vst1q_f32(output.as_mut_ptr().add(row * n + column), c0);
-                    vst1q_f32(output.as_mut_ptr().add((row + 1) * n + column), c1);
-                    vst1q_f32(output.as_mut_ptr().add((row + 2) * n + column), c2);
-                    vst1q_f32(output.as_mut_ptr().add((row + 3) * n + column), c3);
-                    column += 4;
                 }
                 // Scalar tail columns for the four blocked rows.
                 while column < panel_end {
@@ -197,14 +167,17 @@ fn matmul_neon(a: &[f32], b: &[f32], output: &mut [f32], m: usize, k: usize, n: 
             // Tail rows: single-row vector pass plus scalar tail columns.
             while row < m {
                 let mut column = panel;
-                while column + 4 <= panel_end {
-                    let mut c0 = vdupq_n_f32(0.0);
+                while column + 8 <= panel_end {
+                    let mut c0 = _mm256_set1_ps(0.0);
                     for inner in 0..k {
-                        let b_row = vld1q_f32(b.as_ptr().add(inner * n + column));
-                        c0 = vfmaq_f32(c0, vdupq_n_f32(*a.get_unchecked(row * k + inner)), b_row);
+                        let b_row = _mm256_loadu_ps(b.as_ptr().add(inner * n + column));
+                        c0 = _mm256_add_ps(
+                            c0,
+                            _mm256_mul_ps(_mm256_set1_ps(*a.get_unchecked(row * k + inner)), b_row),
+                        );
                     }
-                    vst1q_f32(output.as_mut_ptr().add(row * n + column), c0);
-                    column += 4;
+                    _mm256_storeu_ps(output.as_mut_ptr().add(row * n + column), c0);
+                    column += 8;
                 }
                 while column < panel_end {
                     let mut sum = 0.0_f32;
@@ -306,7 +279,7 @@ unsafe extern "C" fn run(context: *mut KernelContext) -> i32 {
     STATUS_OK
 }
 
-static NAME: &[u8] = b"neon-matmul\0";
+static NAME: &[u8] = b"avx2-matmul\0";
 
 static PLUGIN: KernelPlugin = KernelPlugin {
     abi_version: ABI_VERSION,
@@ -333,9 +306,11 @@ mod tests {
     #[test]
     fn matches_reference_bitwise_on_exact_values() {
         // Inputs are multiples of 0.25 with small magnitudes, so products and
-        // partial sums are exactly representable and FMA contraction cannot
-        // change the result. Sizes exercise the 4x8 micro-kernel, the 4x4
-        // remainder, scalar tail columns, tail rows, and multiple panels.
+        // partial sums are exactly representable. The AVX2 path uses separate
+        // multiply and add with no FMA contraction, so it matches the scalar
+        // reference bitwise on every input, not just these. Sizes exercise
+        // the 4x8 micro-kernel, scalar tail columns, tail rows, and multiple
+        // panels.
         for (m, k, n) in [(6, 7, 10), (5, 17, 130), (9, 3, 66)] {
             let a: Vec<f32> = (0..m * k)
                 .map(|index| (index % 9) as f32 * 0.25 - 1.0)
