@@ -377,9 +377,9 @@ impl LoadedKernel {
     ) -> Result<(), PluginError> {
         self.check_alignment(input.0)?;
         self.check_alignment(output.0.cast_const())?;
-        if !params.is_empty() {
-            self.check_alignment(params.as_ptr())?;
-        }
+        // `params` is a fixed-width byte encoding that kernels parse
+        // byte-wise, so the descriptor alignment applies only to the typed
+        // input and output element buffers, not to it.
         let mut context = KernelContext {
             input: input.0,
             input_bytes: u64::try_from(input.1).map_err(|_| PluginError::LengthOverflow)?,
@@ -1452,6 +1452,31 @@ mod tests {
         let allocations = tracking.count();
         drop(tracking);
         assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn params_alignment_is_not_required() {
+        let kernel = test_kernel(
+            "test-xor",
+            test_xor_shift_add_run,
+            TYPE_U64,
+            TYPE_U64,
+            OPERATION_XOR_SHIFT_ADD,
+        );
+        let input = [1_u64, 2];
+        let mut output = [0_u64; 2];
+        // Params are a fixed-width byte encoding; carve a deliberately
+        // misaligned view. shift=0, add=0 collapses every output to zero.
+        let params_storage = [0_u8; XOR_SHIFT_ADD_PARAMS_BYTES + 1];
+        let params = &params_storage[1..];
+        kernel
+            .invoke(
+                (input.as_ptr().cast(), std::mem::size_of_val(&input)),
+                (output.as_mut_ptr().cast(), std::mem::size_of_val(&output)),
+                params,
+            )
+            .expect("params byte encoding needs no alignment");
+        assert_eq!(output, [0, 0]);
     }
 
     #[test]
