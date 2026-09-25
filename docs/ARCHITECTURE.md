@@ -148,6 +148,17 @@ UOR address: `get_or_compile` compiles and inserts once per distinct plan
 with a fixed scan and no allocation. The cache is caller-owned with a hard
 capacity; a full cache is a typed error, never a silent eviction.
 
+Execution is observable without perturbation: `execute_compiled_plan_traced`
+records a deterministic `ExecutionTrace` — one fixed-capacity entry per
+segment with its kind and logical bytes read and written. Logical means the
+semantic minimum: a fused built-in run accounts one read and one write per
+element no matter how many operations it applies, so the accounting is
+identical on every host and SIMD tier, and it makes fusion's traffic savings
+explicit (a fused three-operation chain accounts 32 KiB against 96 KiB for
+the unfused passes). The trace is allocation-free and costs one branch per
+segment when disabled. `native-machine run` prints the trace summary after
+execution.
+
 ## In-process plugin trust
 
 Plugins are `dlopen`ed shared libraries running in the runtime's address

@@ -317,6 +317,17 @@ fn bench_fused_plan_chain(
     if failures.get() != 0 {
         return Err("fused plan chain failed during benchmarking".into());
     }
+    // Byte accounting: the fused chain's logical traffic vs the unfused
+    // passes. This is what fusion saves when buffers exceed cache.
+    let mut trace = ops::ExecutionTrace::new();
+    ops::execute_compiled_plan_traced(&mut arena, &plan, &mut scratch, registry, &mut trace)?;
+    let unfused_bytes = (size * 4 * 2 * 3) as u64;
+    println!(
+        "plan chain bytes: fused {} read + {} written vs unfused {} total",
+        trace.bytes_read(),
+        trace.bytes_written(),
+        unfused_bytes
+    );
     rows.push(Row {
         label: format!("plan chain add x3 fused ({size} f32, compiled {plan_identity})"),
         elements: size as u64,

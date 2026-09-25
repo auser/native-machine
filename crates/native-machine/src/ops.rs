@@ -592,6 +592,97 @@ pub fn compile_plan(records: &[u8], input_length: usize) -> Result<CompiledPlan,
     Ok(plan)
 }
 
+/// Maximum trace entries: one per plan segment plus the final chain copy.
+pub const MAX_TRACE_ENTRIES: usize = MAX_PLAN_SEGMENTS + 1;
+
+/// What one trace entry records about an executed segment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TraceKind {
+    Builtin {
+        operations: usize,
+    },
+    Plugin {
+        index: u16,
+    },
+    Matmul {
+        index: u16,
+        m: u32,
+        k: u32,
+        n: u32,
+    },
+    MatmulAct {
+        index: u16,
+        m: u16,
+        k: u16,
+        n: u16,
+        activation: u16,
+    },
+    ChainCopy,
+}
+
+/// One executed segment and the logical bytes it moved. Logical means the
+/// semantic minimum: a fused built-in run reads and writes each element once
+/// no matter how many operations it applies, and the accounting is identical
+/// on every host and SIMD tier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TraceEntry {
+    pub kind: TraceKind,
+    pub bytes_read: u64,
+    pub bytes_written: u64,
+}
+
+/// A fixed-capacity, allocation-free execution trace. Deterministic for a
+/// given plan and input length.
+#[derive(Clone, Copy, Debug)]
+pub struct ExecutionTrace {
+    entries: [TraceEntry; MAX_TRACE_ENTRIES],
+    count: usize,
+}
+
+impl ExecutionTrace {
+    pub const fn new() -> Self {
+        Self {
+            entries: [TraceEntry {
+                kind: TraceKind::ChainCopy,
+                bytes_read: 0,
+                bytes_written: 0,
+            }; MAX_TRACE_ENTRIES],
+            count: 0,
+        }
+    }
+
+    pub fn entries(&self) -> &[TraceEntry] {
+        &self.entries[..self.count]
+    }
+
+    pub fn bytes_read(&self) -> u64 {
+        self.entries().iter().map(|entry| entry.bytes_read).sum()
+    }
+
+    pub fn bytes_written(&self) -> u64 {
+        self.entries().iter().map(|entry| entry.bytes_written).sum()
+    }
+
+    /// Plans have at most MAX_PLAN_SEGMENTS segments plus one chain copy, so
+    /// recording can never overflow by construction.
+    fn record(&mut self, kind: TraceKind, bytes_read: u64, bytes_written: u64) {
+        if self.count < MAX_TRACE_ENTRIES {
+            self.entries[self.count] = TraceEntry {
+                kind,
+                bytes_read,
+                bytes_written,
+            };
+            self.count += 1;
+        }
+    }
+}
+
+impl Default for ExecutionTrace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Executes a compiled plan with O(1) per-operation dispatch: no parsing, no
 /// validation, no heap allocation. Buffers ping-pong between the arena output
 /// and caller scratch; fused built-in segments run as strip-mined SIMD passes
@@ -601,6 +692,27 @@ pub fn execute_compiled_plan<D: PluginDispatch>(
     plan: &CompiledPlan,
     scratch: &mut [f32],
     plugins: &D,
+) -> Result<(), ExecuteError> {
+    execute_compiled_plan_inner(arena, plan, scratch, plugins, None)
+}
+
+/// [`execute_compiled_plan`] with deterministic trace and byte accounting:
+/// every executed segment records its kind and logical bytes moved.
+pub fn execute_compiled_plan_traced<D: PluginDispatch>(
+    arena: &mut SessionArena,
+    plan: &CompiledPlan,
+    scratch: &mut [f32],
+    plugins: &D,
+    trace: &mut ExecutionTrace,
+) -> Result<(), ExecuteError> {
+    execute_compiled_plan_inner(arena, plan, scratch, plugins, Some(trace))
+}
+fn execute_compiled_plan_inner<D: PluginDispatch>(
+    arena: &mut SessionArena,
+    plan: &CompiledPlan,
+    scratch: &mut [f32],
+    plugins: &D,
+    mut trace: Option<&mut ExecutionTrace>,
 ) -> Result<(), ExecuteError> {
     let length = arena.input().len();
     if length != plan.length {
@@ -644,6 +756,10 @@ pub fn execute_compiled_plan<D: PluginDispatch>(
                         source = ChainSource::ArenaOutput;
                     }
                 }
+                if let Some(trace) = trace.as_mut() {
+                    let bytes = (current_len * 4) as u64;
+                    trace.record(TraceKind::Builtin { operations: *count }, bytes, bytes);
+                }
             }
             PlanSegment::Plugin { index } => {
                 let plugin_index = usize::from(*index);
@@ -668,6 +784,10 @@ pub fn execute_compiled_plan<D: PluginDispatch>(
                             .map_err(ExecuteError::Plugin)?;
                         source = ChainSource::ArenaOutput;
                     }
+                }
+                if let Some(trace) = trace.as_mut() {
+                    let bytes = (current_len * 4) as u64;
+                    trace.record(TraceKind::Plugin { index: *index }, bytes, bytes);
                 }
             }
             PlanSegment::Matmul { index, m, k, n } => {
@@ -701,6 +821,18 @@ pub fn execute_compiled_plan<D: PluginDispatch>(
                     }
                 }
                 current_len = c_len;
+                if let Some(trace) = trace.as_mut() {
+                    trace.record(
+                        TraceKind::Matmul {
+                            index: *index,
+                            m: *m,
+                            k: *k,
+                            n: *n,
+                        },
+                        ((a_len + b_len) * 4) as u64,
+                        (c_len * 4) as u64,
+                    );
+                }
             }
             PlanSegment::MatmulAct {
                 index,
@@ -767,12 +899,29 @@ pub fn execute_compiled_plan<D: PluginDispatch>(
                     }
                 }
                 current_len = c_len;
+                if let Some(trace) = trace.as_mut() {
+                    trace.record(
+                        TraceKind::MatmulAct {
+                            index: *index,
+                            m: *m,
+                            k: *k,
+                            n: *n,
+                            activation: activation as u16,
+                        },
+                        ((a_len + b_len) * 4) as u64,
+                        (c_len * 4) as u64,
+                    );
+                }
             }
         }
     }
     if matches!(source, ChainSource::Scratch) {
         let output = arena.output_mut(current_len)?;
         output.copy_from_slice(&scratch[..current_len]);
+        if let Some(trace) = trace.as_mut() {
+            let bytes = (current_len * 4) as u64;
+            trace.record(TraceKind::ChainCopy, bytes, bytes);
+        }
     }
     Ok(())
 }
@@ -1570,6 +1719,85 @@ mod tests {
             }
             let _ = compile_plan(&records, 4);
         }
+    }
+
+    #[test]
+    fn traced_execution_accounts_logical_bytes() {
+        let mut arena = SessionArena::new();
+        arena.load_input(&[1.0, 2.0]).expect("input fits");
+        let records = chain_records(&[(1, 1.0), (1, 2.0), (1, 3.0)], 2);
+        let plan = compile_plan(&records, 2).expect("plan compiles");
+        let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
+        let mut trace = ExecutionTrace::new();
+        execute_compiled_plan_traced(&mut arena, &plan, &mut scratch, &TestPlugin, &mut trace)
+            .expect("plan executes");
+        assert_eq!(
+            trace.entries(),
+            &[TraceEntry {
+                kind: TraceKind::Builtin { operations: 3 },
+                bytes_read: 8,
+                bytes_written: 8,
+            }]
+        );
+        assert_eq!(trace.bytes_read(), 8);
+        assert_eq!(trace.bytes_written(), 8);
+    }
+
+    #[test]
+    fn trace_records_plugin_and_matmul_segments() {
+        let mut arena = SessionArena::new();
+        arena
+            .load_input(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+            .expect("input fits");
+        let mut records = Vec::from(matmul_record(2, 2, 2));
+        records.extend_from_slice(&chain_records(&[(PLUGIN_OPCODE, 0.0)], 4));
+        let plan = compile_plan(&records, 8).expect("plan compiles");
+        let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
+        let mut trace = ExecutionTrace::new();
+        execute_compiled_plan_traced(&mut arena, &plan, &mut scratch, &TestPlugin, &mut trace)
+            .expect("plan executes");
+        assert_eq!(
+            trace.entries(),
+            &[
+                TraceEntry {
+                    kind: TraceKind::Matmul {
+                        index: 0,
+                        m: 2,
+                        k: 2,
+                        n: 2,
+                    },
+                    bytes_read: 32,
+                    bytes_written: 16,
+                },
+                TraceEntry {
+                    kind: TraceKind::Plugin { index: 0 },
+                    bytes_read: 16,
+                    bytes_written: 16,
+                },
+                TraceEntry {
+                    kind: TraceKind::ChainCopy,
+                    bytes_read: 16,
+                    bytes_written: 16,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn trace_records_chain_copy_and_is_deterministic() {
+        let records = chain_records(&[(PLUGIN_OPCODE, 0.0), (1, 1.0)], 2);
+        let plan = compile_plan(&records, 2).expect("plan compiles");
+        let mut traces = [ExecutionTrace::new(), ExecutionTrace::new()];
+        for trace in &mut traces {
+            let mut arena = SessionArena::new();
+            arena.load_input(&[1.0, 2.0]).expect("input fits");
+            let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
+            execute_compiled_plan_traced(&mut arena, &plan, &mut scratch, &TestPlugin, trace)
+                .expect("plan executes");
+        }
+        assert_eq!(traces[0].entries(), traces[1].entries());
+        assert_eq!(traces[0].entries().len(), 3);
+        assert_eq!(traces[0].entries()[2].kind, TraceKind::ChainCopy);
     }
 
     #[test]

@@ -88,14 +88,24 @@ fn main() -> Result<(), Box<dyn Error>> {
             let plugins = plugin::load_registry(&config)?;
             // Compile the artifact's operation section once, then dispatch
             // the pre-digested plan (O(1) per operation, no per-record
-            // parsing at execution).
+            // parsing at execution) with deterministic byte accounting.
             let plan = ops::compile_plan(operation_section.bytes, value_count)?;
-            ops::execute_compiled_plan(&mut arena, &plan, &mut scratch, &plugins)?;
+            let mut trace = ops::ExecutionTrace::new();
+            ops::execute_compiled_plan_traced(
+                &mut arena,
+                &plan,
+                &mut scratch,
+                &plugins,
+                &mut trace,
+            )?;
             println!(
-                "executed artifact {} with input {}: {:?}",
+                "executed artifact {} with input {}: {:?}\ntrace: {} segment(s), {} bytes read, {} bytes written",
                 artifact.display(),
                 input.display(),
-                arena.output()
+                arena.output(),
+                trace.entries().len(),
+                trace.bytes_read(),
+                trace.bytes_written()
             );
         }
         None => Cli::command().print_help()?,

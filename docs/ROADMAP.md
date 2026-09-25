@@ -34,7 +34,7 @@
 - [x] full-byte artifact identity
 - [x] canonical provenance identity path
 - [x] allocation-counting test
-- [ ] deterministic trace and byte-read accounting
+- [x] deterministic trace and byte-read accounting
 
 ## Phase 4 — native kernels
 
