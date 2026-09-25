@@ -173,3 +173,18 @@ allocates on the success path.
 `uor-addr` supplies stable identities for manifests and operation plans. The
 runtime treats the address as provenance, not authorization. The prism/partition
 integration remains an adapter boundary until its actual API contract is known.
+
+## Compiler foundation (Phase 5)
+
+The compiler pipeline mirrors a classic back end: a source-independent IR
+(`ir.rs`) sits between any future front end and the emitter. `IrPlan::lower`
+is the emitter: it resolves kernel names to registry indices, validates each
+kernel's declared operation kind, tracks chain lengths through shape changes,
+and emits the fixed-width records that `compile_plan` digests.
+`IrPlan::certify` is behavioral certification: it executes the lowered plan
+through the full runtime (records, compilation, buffer chaining, fusion) and
+compares every output element bitwise against direct reference evaluation of
+the same IR. The record format is deliberately a tiny fixed instruction set
+with immediates carried inline; fusion decisions (a fused `MATMUL_ACT` op
+versus separate matmul and activation ops) are the compiler's choice, not the
+runtime's.

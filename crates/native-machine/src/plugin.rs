@@ -265,6 +265,15 @@ impl PluginRegistry {
         self.entries.iter().position(|entry| entry.name == name)
     }
 
+    /// The operation kind a registered kernel declares, used by the plan
+    /// lowering adapter to validate kernel-table bindings.
+    pub fn kernel_operation(&self, name: &str) -> Option<u16> {
+        self.entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.plugin.kernel.operation)
+    }
+
     pub fn run_f32(
         &self,
         name: &str,
@@ -972,7 +981,7 @@ impl LoadedKernel {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1165,7 +1174,7 @@ mod tests {
         }
     }
 
-    fn test_registry() -> PluginRegistry {
+    pub(crate) fn test_registry() -> PluginRegistry {
         PluginRegistry {
             entries: vec![
                 RegistryEntry {

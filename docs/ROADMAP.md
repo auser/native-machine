@@ -61,8 +61,8 @@
 
 ## Phase 5 — compiler
 
-- [ ] source-independent intermediate representation
+- [x] source-independent intermediate representation
 - [ ] route/plane lowering adapter
-- [ ] packed operation emission
-- [ ] behavioral certification
+- [x] packed operation emission
+- [x] behavioral certification
 - [ ] atomic artifact publication
