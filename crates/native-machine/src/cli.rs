@@ -58,9 +58,20 @@ pub enum KernelCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum ArtifactCommand {
-    Inspect { path: PathBuf },
-    Validate { path: PathBuf },
-    CreateFixture { path: PathBuf },
+    Inspect {
+        path: PathBuf,
+    },
+    Validate {
+        path: PathBuf,
+    },
+    CreateFixture {
+        path: PathBuf,
+    },
+    /// Compile a plan source file into a publishable artifact.
+    CreatePlan {
+        source: PathBuf,
+        output: PathBuf,
+    },
 }
 
 #[derive(Args, Debug)]

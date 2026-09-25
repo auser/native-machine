@@ -65,4 +65,4 @@
 - [ ] route/plane lowering adapter
 - [x] packed operation emission
 - [x] behavioral certification
-- [ ] atomic artifact publication
+- [x] atomic artifact publication

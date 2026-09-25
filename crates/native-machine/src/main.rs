@@ -43,6 +43,24 @@ fn main() -> Result<(), Box<dyn Error>> {
             cli::ArtifactCommand::CreateFixture { path } => {
                 artifact::create_fixture(Path::new(&path))?
             }
+            cli::ArtifactCommand::CreatePlan { source, output } => {
+                let text = fs::read_to_string(&source)?;
+                let ir = ir::IrPlan::parse(&text)?;
+                let input_length = ir
+                    .input_length()
+                    .ok_or("plan source must declare its input length with `input N`")?;
+                let plugins = plugin::load_registry(&config)?;
+                let records = ir.lower(&plugins, input_length)?;
+                // Compile once here so malformed plans never reach an artifact.
+                let plan = ops::compile_plan(&records, input_length)?;
+                let provenance = format!(
+                    "{{\"compiler\":\"native-machine\",\"source\":\"{}\",\"plan\":\"{}\"}}",
+                    source.display(),
+                    plan.identity()?
+                );
+                artifact::create_artifact(Path::new(&output), &records, provenance.as_bytes())?;
+                println!("compiled plan {} -> {}", source.display(), output.display());
+            }
         },
         Some(Command::Run(cli::RunArgs { artifact, input })) => {
             let mapped =

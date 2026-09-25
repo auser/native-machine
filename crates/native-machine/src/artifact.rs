@@ -355,22 +355,28 @@ pub fn inspect(path: &Path) -> Result<(), ArtifactError> {
     Ok(())
 }
 
-pub fn create_fixture(path: &Path) -> Result<(), ArtifactError> {
+/// Builds an artifact from operation records and a provenance payload, and
+/// publishes it atomically (temporary file plus rename). The artifact is
+/// validated before publication; partial writes are never visible.
+pub fn create_artifact(
+    path: &Path,
+    operations: &[u8],
+    provenance: &[u8],
+) -> Result<(), ArtifactError> {
     let section_table_offset = HEADER_BYTES;
     let operation_offset = HEADER_BYTES + (SECTION_BYTES * 2);
-    let provenance = br#"{"compiler":"native-machine","layout":"bootstrap","profile":"scalar"}"#;
-    let provenance_offset = operation_offset + 16;
+    let provenance_offset = operation_offset + operations.len();
     let artifact_bytes = provenance_offset + provenance.len();
     let mut bytes = vec![0_u8; artifact_bytes];
     bytes[..8].copy_from_slice(&MAGIC);
     bytes[8..10].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
     bytes[12..16].copy_from_slice(&2_u32.to_le_bytes());
     bytes[16..24].copy_from_slice(&(section_table_offset as u64).to_le_bytes());
-    bytes[24..32].copy_from_slice(&artifact_bytes.to_le_bytes());
+    bytes[24..32].copy_from_slice(&(artifact_bytes as u64).to_le_bytes());
     let table = section_table_offset;
     bytes[table..table + 4].copy_from_slice(&crate::ops::OPERATION_SECTION.to_le_bytes());
     bytes[table + 8..table + 16].copy_from_slice(&(operation_offset as u64).to_le_bytes());
-    bytes[table + 16..table + 24].copy_from_slice(&16_u64.to_le_bytes());
+    bytes[table + 16..table + 24].copy_from_slice(&(operations.len() as u64).to_le_bytes());
     bytes[table + 24..table + 32].copy_from_slice(&4_u64.to_le_bytes());
     let provenance_record = table + SECTION_BYTES;
     bytes[provenance_record..provenance_record + 4]
@@ -380,15 +386,25 @@ pub fn create_fixture(path: &Path) -> Result<(), ArtifactError> {
     bytes[provenance_record + 16..provenance_record + 24]
         .copy_from_slice(&(provenance.len() as u64).to_le_bytes());
     bytes[provenance_record + 24..provenance_record + 32].copy_from_slice(&4_u64.to_le_bytes());
-    let operation = operation_offset;
-    bytes[operation + 4..operation + 8].copy_from_slice(&1.0_f32.to_le_bytes());
-    bytes[operation + 8..operation + 12].copy_from_slice(&4_u32.to_le_bytes());
-    bytes[operation + 12..operation + 16].copy_from_slice(&4_u32.to_le_bytes());
+    bytes[operation_offset..operation_offset + operations.len()].copy_from_slice(operations);
     bytes[provenance_offset..].copy_from_slice(provenance);
     Artifact::parse(&bytes)?;
     let temporary = path.with_extension("tmp");
     fs::write(&temporary, bytes)?;
     fs::rename(&temporary, path)?;
+    Ok(())
+}
+
+pub fn create_fixture(path: &Path) -> Result<(), ArtifactError> {
+    let mut operations = [0_u8; crate::ops::OPERATION_BYTES];
+    operations[4..8].copy_from_slice(&1.0_f32.to_le_bytes());
+    operations[8..12].copy_from_slice(&4_u32.to_le_bytes());
+    operations[12..16].copy_from_slice(&4_u32.to_le_bytes());
+    create_artifact(
+        path,
+        &operations,
+        br#"{"compiler":"native-machine","layout":"bootstrap","profile":"scalar"}"#,
+    )?;
     println!("created fixture {}", path.display());
     Ok(())
 }

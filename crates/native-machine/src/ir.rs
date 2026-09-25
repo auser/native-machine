@@ -38,12 +38,15 @@ pub enum IrOp {
 #[derive(Debug, Default)]
 pub struct IrPlan {
     ops: Vec<IrOp>,
+    input_length: Option<usize>,
 }
 
 #[derive(Debug, Error)]
 pub enum IrError {
     #[error("kernel is not registered: {0}")]
     UnknownKernel(String),
+    #[error("plan source line {line}: {message}")]
+    Parse { line: usize, message: String },
     #[error("IR operation {index} does not match the chain length")]
     Chain { index: usize },
     #[error("kernel {kernel} declares operation kind {actual}, the IR needs {expected}")]
@@ -79,6 +82,74 @@ impl IrPlan {
 
     pub fn ops(&self) -> &[IrOp] {
         &self.ops
+    }
+
+    /// Declared input length from the plan source's `input N` directive.
+    pub fn input_length(&self) -> Option<usize> {
+        self.input_length
+    }
+
+    /// Parses a plan source into an IR plan. The format is one operation per
+    /// line, with `#` comments and blank lines ignored. An optional
+    /// `input N` directive declares the plan's input length, required when
+    /// lowering to records (which carry lengths inline):
+    ///
+    /// ```text
+    /// input VALUES
+    /// copy
+    /// add_scalar VALUE
+    /// elementwise KERNEL
+    /// matmul KERNEL M K N
+    /// matmul_act KERNEL M K N ACTIVATION
+    /// ```
+    pub fn parse(source: &str) -> Result<Self, IrError> {
+        let mut plan = IrPlan::new();
+        for (index, raw_line) in source.lines().enumerate() {
+            let line = index + 1;
+            let text = raw_line.split('#').next().unwrap_or("").trim();
+            if text.is_empty() {
+                continue;
+            }
+            let tokens: Vec<&str> = text.split_whitespace().collect();
+            match tokens.as_slice() {
+                ["input", values] => {
+                    if plan.input_length.is_some() {
+                        return Err(IrError::Parse {
+                            line,
+                            message: "duplicate input directive".to_string(),
+                        });
+                    }
+                    plan.input_length = Some(parse_u32(values, line)? as usize);
+                }
+                ["copy"] => plan.push(IrOp::Copy),
+                ["add_scalar", value] => plan.push(IrOp::AddScalar {
+                    value: parse_f32(value, line)?,
+                }),
+                ["elementwise", kernel] => plan.push(IrOp::PluginElementwise {
+                    kernel: (*kernel).to_owned(),
+                }),
+                ["matmul", kernel, m, k, n] => plan.push(IrOp::Matmul {
+                    kernel: (*kernel).to_owned(),
+                    m: parse_u32(m, line)?,
+                    k: parse_u32(k, line)?,
+                    n: parse_u32(n, line)?,
+                }),
+                ["matmul_act", kernel, m, k, n, activation] => plan.push(IrOp::MatmulAct {
+                    kernel: (*kernel).to_owned(),
+                    m: parse_u16(m, line)?,
+                    k: parse_u16(k, line)?,
+                    n: parse_u16(n, line)?,
+                    activation: parse_u16(activation, line)?,
+                }),
+                _ => {
+                    return Err(IrError::Parse {
+                        line,
+                        message: format!("unrecognized operation: {text}"),
+                    })
+                }
+            }
+        }
+        Ok(plan)
     }
 
     /// Lowers the IR to fixed-width operation records, resolving kernel names
@@ -249,6 +320,27 @@ impl IrPlan {
     }
 }
 
+fn parse_f32(token: &str, line: usize) -> Result<f32, IrError> {
+    token.parse::<f32>().map_err(|_| IrError::Parse {
+        line,
+        message: format!("invalid number: {token}"),
+    })
+}
+
+fn parse_u32(token: &str, line: usize) -> Result<u32, IrError> {
+    token.parse::<u32>().map_err(|_| IrError::Parse {
+        line,
+        message: format!("invalid dimension: {token}"),
+    })
+}
+
+fn parse_u16(token: &str, line: usize) -> Result<u16, IrError> {
+    token.parse::<u16>().map_err(|_| IrError::Parse {
+        line,
+        message: format!("invalid dimension: {token}"),
+    })
+}
+
 fn write_elementwise_lengths(
     record: &mut [u8; ops::OPERATION_BYTES],
     length: usize,
@@ -321,6 +413,56 @@ mod tests {
         let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
         plan.certify(&input, &registry, &mut scratch)
             .expect("plan certifies");
+    }
+
+    #[test]
+    fn parses_plan_source() {
+        let source =
+            "# a fused plan\ninput 8\n\nmatmul_act avx2-fma-matmul-act 2 2 2 1\nadd_scalar 0.5\n";
+        let plan = IrPlan::parse(source).expect("source parses");
+        assert_eq!(plan.input_length(), Some(8));
+        assert_eq!(plan.ops().len(), 2);
+        assert_eq!(
+            plan.ops()[0],
+            IrOp::MatmulAct {
+                kernel: "avx2-fma-matmul-act".to_owned(),
+                m: 2,
+                k: 2,
+                n: 2,
+                activation: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_reports_line_numbers() {
+        assert!(matches!(
+            IrPlan::parse("input 4\nbogus op\n"),
+            Err(IrError::Parse { line: 2, .. })
+        ));
+        assert!(matches!(
+            IrPlan::parse("input 4\ninput 8\n"),
+            Err(IrError::Parse { line: 2, .. })
+        ));
+        assert!(matches!(
+            IrPlan::parse("add_scalar elephant\n"),
+            Err(IrError::Parse { line: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn certifies_parsed_source_end_to_end() {
+        let registry = crate::plugin::tests::test_registry();
+        let plan = IrPlan::parse(
+            "input 8\nmatmul_act test-matmul-act 2 2 2 1\nelementwise test-elementwise\n",
+        )
+        .expect("source parses");
+        let input = [1.0_f32, 2.0, 3.0, 4.0, -5.0, 6.0, 7.0, -8.0];
+        let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
+        let output = plan
+            .certify(&input, &registry, &mut scratch)
+            .expect("plan certifies");
+        assert_eq!(output, vec![10.0, 1.0, 14.0, 1.0]);
     }
 
     #[test]

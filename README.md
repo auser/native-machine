@@ -139,6 +139,15 @@ native-machine artifact inspect ./fixture.nm
 native-machine run --artifact ./fixture.nm --input ./input.f32le
 ```
 
+Plans can also be written in a small line-based source format and compiled
+to an artifact (see `docs/ARCHITECTURE.md` for the grammar):
+
+```text
+printf 'input 8\nmatmul avx2-fma-matmul 2 2 2\nelementwise reference-relu\n' > plan.txt
+native-machine artifact create-plan plan.txt plan.nm
+native-machine run --artifact plan.nm --input ./matmul-input.f32le
+```
+
 `input.f32le` is a caller-created file containing little-endian `f32` values.
 The runtime bounds it to the fixed session arena before execution.
 
