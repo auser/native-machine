@@ -465,6 +465,43 @@ mod tests {
         assert_eq!(output, vec![10.0, 1.0, 14.0, 1.0]);
     }
 
+    struct TestRng(u64);
+
+    impl TestRng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+    }
+
+    #[test]
+    fn parse_never_panics_on_random_source() {
+        let mut rng = TestRng(0x2545_F491_4F6C_DD1D);
+        let alphabet: Vec<char> = "abcdefghilmnprstuw_0123456789.- \t\n#".chars().collect();
+        for _ in 0..5_000 {
+            let length = (rng.next() % 80) as usize;
+            let source: String = (0..length)
+                .map(|_| alphabet[(rng.next() as usize) % alphabet.len()])
+                .collect();
+            let first = IrPlan::parse(&source);
+            let second = IrPlan::parse(&source);
+            match (&first, &second) {
+                (Ok(first), Ok(second)) => {
+                    assert_eq!(first.ops(), second.ops());
+                    assert_eq!(first.input_length(), second.input_length());
+                }
+                (Err(first), Err(second)) => {
+                    assert_eq!(format!("{first:?}"), format!("{second:?}"));
+                }
+                _ => panic!("parse is nondeterministic on {source:?}"),
+            }
+        }
+    }
+
     #[test]
     fn certifies_fused_matmul_chain() {
         let registry = crate::plugin::tests::test_registry();

@@ -18,11 +18,10 @@
 - [x] artifact fixture writer
 - [x] section overlap validation
 - [x] mmap-backed immutable artifact view
-- [ ] manifest admission and provenance
+- [x] manifest admission and provenance
 
 ## Phase 3 — zero-allocation execution
 
-- [ ] fixed session arena and layout planner
 - [x] fixed session arena and layout planner
 - [x] bounded scalar operation executor
 - [x] scalar reference executor
@@ -56,7 +55,7 @@
 - [x] zero-copy plugin record dispatch
 - [x] SIMD differential tests (NEON vs scalar reference oracles)
 - [x] resolve-once kernel handles for hot-loop dispatch
-- [ ] one-time scalar/NEON/AVX2/VNNI dispatch in built-in operations
+- [x] one-time scalar/NEON/AVX2 dispatch in built-in operations (VNNI: no integer built-ins yet)
 - [x] kernel head-to-head benchmarks (`just bench`, native baseline ratios)
 
 ## Phase 5 — compiler

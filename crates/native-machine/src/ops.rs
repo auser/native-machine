@@ -120,12 +120,51 @@ fn add_scalar(input: &[f32], output: &mut [f32], value: f32) {
             return;
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        add_scalar_neon(input, output, value);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     add_scalar_scalar(input, output, value);
 }
 
 fn add_scalar_scalar(input: &[f32], output: &mut [f32], value: f32) {
     for (source, destination) in input.iter().zip(output.iter_mut()) {
         *destination = *source + value;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn add_scalar_neon(input: &[f32], output: &mut [f32], value: f32) {
+    use std::arch::aarch64::{vaddq_f32, vdupq_n_f32, vld1q_f32, vst1q_f32};
+    // SAFETY: NEON is mandatory on AArch64. All loads and stores stay within
+    // the first `vectorized` elements, which is <= input.len() == output.len();
+    // NEON accesses do not require alignment.
+    unsafe {
+        let broadcast = vdupq_n_f32(value);
+        let vectorized = input.len() / 16 * 16;
+        let mut index = 0;
+        while index < vectorized {
+            let first = vld1q_f32(input.as_ptr().add(index));
+            let second = vld1q_f32(input.as_ptr().add(index + 4));
+            let third = vld1q_f32(input.as_ptr().add(index + 8));
+            let fourth = vld1q_f32(input.as_ptr().add(index + 12));
+            vst1q_f32(output.as_mut_ptr().add(index), vaddq_f32(first, broadcast));
+            vst1q_f32(
+                output.as_mut_ptr().add(index + 4),
+                vaddq_f32(second, broadcast),
+            );
+            vst1q_f32(
+                output.as_mut_ptr().add(index + 8),
+                vaddq_f32(third, broadcast),
+            );
+            vst1q_f32(
+                output.as_mut_ptr().add(index + 12),
+                vaddq_f32(fourth, broadcast),
+            );
+            index += 16;
+        }
+        add_scalar_scalar(&input[index..], &mut output[index..], value);
     }
 }
 
@@ -785,8 +824,49 @@ fn copy_add(input: &[f32], output: &mut [f32], operand: f32) {
             return;
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        copy_add_neon(input, output, operand);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     for (source, destination) in input.iter().zip(output.iter_mut()) {
         *destination = *source + operand;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn copy_add_neon(input: &[f32], output: &mut [f32], operand: f32) {
+    use std::arch::aarch64::{vaddq_f32, vdupq_n_f32, vld1q_f32, vst1q_f32};
+    // SAFETY: NEON is mandatory on AArch64. All loads and stores stay within
+    // the first `vectorized` elements, which is <= input.len() == output.len();
+    // NEON accesses do not require alignment.
+    unsafe {
+        let broadcast = vdupq_n_f32(operand);
+        let vectorized = input.len() / 16 * 16;
+        let mut index = 0;
+        while index < vectorized {
+            let first = vld1q_f32(input.as_ptr().add(index));
+            let second = vld1q_f32(input.as_ptr().add(index + 4));
+            let third = vld1q_f32(input.as_ptr().add(index + 8));
+            let fourth = vld1q_f32(input.as_ptr().add(index + 12));
+            vst1q_f32(output.as_mut_ptr().add(index), vaddq_f32(first, broadcast));
+            vst1q_f32(
+                output.as_mut_ptr().add(index + 4),
+                vaddq_f32(second, broadcast),
+            );
+            vst1q_f32(
+                output.as_mut_ptr().add(index + 8),
+                vaddq_f32(third, broadcast),
+            );
+            vst1q_f32(
+                output.as_mut_ptr().add(index + 12),
+                vaddq_f32(fourth, broadcast),
+            );
+            index += 16;
+        }
+        for (source, destination) in input[index..].iter().zip(output[index..].iter_mut()) {
+            *destination = *source + operand;
+        }
     }
 }
 
@@ -826,8 +906,49 @@ fn add_scalar_in_place(values: &mut [f32], operand: f32) {
             return;
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        add_scalar_in_place_neon(values, operand);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     for value in values {
         *value += operand;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn add_scalar_in_place_neon(values: &mut [f32], operand: f32) {
+    use std::arch::aarch64::{vaddq_f32, vdupq_n_f32, vld1q_f32, vst1q_f32};
+    // SAFETY: NEON is mandatory on AArch64. All loads and stores stay within
+    // the first `vectorized` elements of the slice; NEON accesses do not
+    // require alignment.
+    unsafe {
+        let broadcast = vdupq_n_f32(operand);
+        let vectorized = values.len() / 16 * 16;
+        let mut index = 0;
+        while index < vectorized {
+            let first = vld1q_f32(values.as_ptr().add(index));
+            let second = vld1q_f32(values.as_ptr().add(index + 4));
+            let third = vld1q_f32(values.as_ptr().add(index + 8));
+            let fourth = vld1q_f32(values.as_ptr().add(index + 12));
+            vst1q_f32(values.as_mut_ptr().add(index), vaddq_f32(first, broadcast));
+            vst1q_f32(
+                values.as_mut_ptr().add(index + 4),
+                vaddq_f32(second, broadcast),
+            );
+            vst1q_f32(
+                values.as_mut_ptr().add(index + 8),
+                vaddq_f32(third, broadcast),
+            );
+            vst1q_f32(
+                values.as_mut_ptr().add(index + 12),
+                vaddq_f32(fourth, broadcast),
+            );
+            index += 16;
+        }
+        for value in &mut values[index..] {
+            *value += operand;
+        }
     }
 }
 
@@ -1396,6 +1517,59 @@ mod tests {
         let allocations = tracking.count();
         drop(tracking);
         assert_eq!(allocations, 0);
+    }
+
+    struct TestRng(u64);
+
+    impl TestRng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+    }
+
+    #[test]
+    fn compile_plan_never_panics_on_random_bytes() {
+        let mut rng = TestRng(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..10_000 {
+            let length = (rng.next() % 65) as usize;
+            let mut bytes = vec![0_u8; length];
+            for byte in &mut bytes {
+                *byte = (rng.next() & 0xFF) as u8;
+            }
+            let first = compile_plan(&bytes, 4);
+            let second = compile_plan(&bytes, 4);
+            match (&first, &second) {
+                (Ok(first), Ok(second)) => assert_eq!(
+                    first.identity().expect("identity computes"),
+                    second.identity().expect("identity computes"),
+                    "compile_plan must be deterministic"
+                ),
+                (Err(first), Err(second)) => {
+                    assert_eq!(format!("{first:?}"), format!("{second:?}"));
+                }
+                _ => panic!("compile_plan is nondeterministic on {bytes:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn compile_plan_never_panics_on_mutated_valid_records() {
+        let mut rng = TestRng(0xD1B5_4A35_1234_5678);
+        for _ in 0..1_000 {
+            let mut records = chain_records(&[(1, 1.0), (PLUGIN_OPCODE, 0.0), (1, 2.0)], 4);
+            records.extend_from_slice(&matmul_record(2, 2, 2));
+            records.extend_from_slice(&matmul_act_record(2, 2, 2, 1));
+            for _ in 0..(rng.next() % 4 + 1) {
+                let position = (rng.next() as usize) % records.len();
+                records[position] = (rng.next() & 0xFF) as u8;
+            }
+            let _ = compile_plan(&records, 4);
+        }
     }
 
     #[test]

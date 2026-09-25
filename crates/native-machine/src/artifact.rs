@@ -460,6 +460,37 @@ mod tests {
         bytes
     }
 
+    struct TestRng(u64);
+
+    impl TestRng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+    }
+
+    #[test]
+    fn parser_survives_random_mutations() {
+        let mut rng = TestRng(0x62BF_6A22_5813_AA09);
+        for _ in 0..1_000 {
+            let mut bytes = fixture();
+            for _ in 0..(rng.next() % 4 + 1) {
+                let position = (rng.next() as usize) % bytes.len();
+                bytes[position] = (rng.next() & 0xFF) as u8;
+            }
+            let first = Artifact::parse(&bytes);
+            let second = Artifact::parse(&bytes);
+            assert_eq!(first.is_err(), second.is_err());
+            if let (Ok(first), Ok(second)) = (first, second) {
+                assert_eq!(first.header, second.header);
+            }
+        }
+    }
+
     #[test]
     fn parses_borrowed_section() {
         let bytes = fixture();
