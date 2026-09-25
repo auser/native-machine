@@ -1,3 +1,4 @@
 target/
 Cargo.lock
 specs/scratch.md
+*.tar.gz
