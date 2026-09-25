@@ -36,29 +36,40 @@ Next steps:
 ```
 
 The command is idempotent. A second invocation reports existing paths and does
-not overwrite configuration or artifacts.
+not overwrite configuration or artifacts. This document describes the intended
+experience; the sections below mark what is implemented today.
 
 ## Commands
 
-The initial CLI should expose:
+The CLI exposes:
 
 ```text
 native-machine init [--root PATH] [--force]
 native-machine inspect-host
 native-machine doctor
+native-machine config show
 native-machine kernel list
 native-machine kernel inspect PATH
+native-machine kernel test PATH
 native-machine kernel install PATH
+native-machine kernel demo
+native-machine kernel bench
 native-machine artifact inspect PATH
 native-machine artifact validate PATH
+native-machine artifact create-fixture PATH
+native-machine artifact create-plan SOURCE OUTPUT
 native-machine run --artifact PATH --input PATH
 ```
 
-`init` creates only local directories and a commented configuration template.
-`doctor` performs checks without modifying anything. `kernel install` is the
-only command that admits a plugin. It loads the library, resolves the versioned
-entry point, validates the descriptor, runs a bounded self-test, and only then
-copies it into the managed plugin directory.
+`init` creates only local directories and a configuration file. `doctor`
+performs checks without modifying anything. `kernel install` is the only
+command that admits a plugin. It loads the library, resolves the versioned
+ABI v3 entry point, validates the descriptor, runs a bounded determinism
+self-test, and only then copies it into the managed plugin directory with an
+adjacent `<name>.manifest.toml` recording the plugin's name, ABI version,
+size, and SHA-256 identity. `kernel list` re-verifies those manifests on
+every load. `kernel demo` and `kernel bench` exercise the installed kernels;
+`just kernel-demo` and `just bench` drive them end to end.
 
 ## Directory layout
 
@@ -68,7 +79,8 @@ copies it into the managed plugin directory.
 ├── cache/
 ├── artifacts/
 ├── plugins/
-│   └── manifests/
+│   ├── libexample.dylib
+│   └── libexample.dylib.manifest.toml
 ├── logs/
 └── state/
 ```

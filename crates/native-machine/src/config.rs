@@ -70,14 +70,7 @@ impl Config {
     }
 
     pub fn init(&self, force: bool) -> Result<(), ConfigError> {
-        for directory in [
-            "cache",
-            "artifacts",
-            "plugins",
-            "plugins/manifests",
-            "logs",
-            "state",
-        ] {
+        for directory in ["cache", "artifacts", "plugins", "logs", "state"] {
             let path = self.root.join(directory);
             fs::create_dir_all(&path).map_err(|source| ConfigError::Write { path, source })?;
         }
