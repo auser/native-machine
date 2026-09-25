@@ -281,13 +281,16 @@ fn bench_fused_plan_chain(
     let mut arena = SessionArena::new();
     arena.load_input(&f32_values(size))?;
     let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
-    ops::execute_chain_with_plugins(&mut arena, &records, &mut scratch, registry)?;
+    // Compile once, outside the timed loop; execution is O(1) per operation.
+    let plan = ops::compile_plan(&records, size)?;
+    let plan_identity = plan.identity()?;
+    ops::execute_compiled_plan(&mut arena, &plan, &mut scratch, registry)?;
 
     let failures = Cell::new(0_u64);
     let (fused_iterations, fused_elapsed) = measure(|| {
-        if ops::execute_chain_with_plugins(
+        if ops::execute_compiled_plan(
             black_box(&mut arena),
-            black_box(&records),
+            black_box(&plan),
             black_box(&mut scratch),
             registry,
         )
@@ -315,7 +318,7 @@ fn bench_fused_plan_chain(
         return Err("fused plan chain failed during benchmarking".into());
     }
     rows.push(Row {
-        label: format!("plan chain add x3 fused ({size} f32)"),
+        label: format!("plan chain add x3 fused ({size} f32, compiled {plan_identity})"),
         elements: size as u64,
         native_ns: Some(nanos(pass_iterations, pass_elapsed)),
         dispatched_ns: nanos(fused_iterations, fused_elapsed),
@@ -511,6 +514,33 @@ fn bench_identities(config: &Config, rows: &mut Vec<Row>) -> Result<(), Box<dyn 
     }
     rows.push(Row {
         label: "plugin admission (manifest verify + load)".to_string(),
+        elements: 0,
+        native_ns: None,
+        dispatched_ns: nanos(iterations, elapsed),
+    });
+
+    // One-time plan compilation and content addressing (amortized to zero
+    // across executions of the same plan).
+    let size = crate::arena::MAX_VALUES;
+    let mut records = Vec::new();
+    for _ in 0..3 {
+        let mut record = [0_u8; ops::OPERATION_BYTES];
+        record[0..2].copy_from_slice(&1_u16.to_le_bytes());
+        record[4..8].copy_from_slice(&1.0_f32.to_le_bytes());
+        record[8..12].copy_from_slice(&(size as u32).to_le_bytes());
+        record[12..16].copy_from_slice(&(size as u32).to_le_bytes());
+        records.extend_from_slice(&record);
+    }
+    let (iterations, elapsed) = measure(|| {
+        if black_box(ops::compile_plan(&records, size).and_then(|plan| plan.identity())).is_err() {
+            failures.set(failures.get() + 1);
+        }
+    });
+    if failures.get() != 0 {
+        return Err("plan compilation failed during benchmarking".into());
+    }
+    rows.push(Row {
+        label: "plan compile + uor address (3 records)".to_string(),
         elements: 0,
         native_ns: None,
         dispatched_ns: nanos(iterations, elapsed),

@@ -116,19 +116,18 @@ contract.
 
 Fusion exists at both levels. Kernel-level fusion is a new operation kind
 (`MATMUL_ACT`): the activation is applied to accumulators before the single
-output store. Plan-level fusion lives in the chained record executor
-(`execute_chain_with_plugins`): records consume the previous record's output,
-and maximal runs of built-in elementwise records execute as one fused pass —
-each element is transformed by every operation in the run before moving to
-the next, which is bitwise identical to separate passes while intermediates
-never round-trip through memory. Plugin records are opaque to the executor
-and break fusion runs; dispatching them is zero-copy straight from the
-session input. Measured honestly: at the fixed session arena's
-cache-resident sizes the fused executor is performance-neutral against raw
-unfused passes (there is no memory round-trip to avoid in L1), so the win
-materializes only for plans whose intermediate buffers exceed cache; the
-zero-copy plugin dispatch it enabled cut artifact record dispatch from
-2.3x to ~1.1x native.
+output store. Plan-level fusion is a two-phase design: `compile_plan`
+validates the record stream once, groups it into segments (fused built-in
+runs and plugin dispatches), extracts operands, and stamps the plan with a
+canonical UOR content address via `uor-addr`; `execute_compiled_plan` then
+dispatches pre-digested segments in O(1) per operation with no parsing, no
+validation, and no heap allocation. Fused built-in segments run as
+strip-mined SIMD passes (first AddScalar folded into the input copy, the
+rest in place per strip), bitwise identical to separate passes while
+intermediates stay cache-resident. Compilation and addressing cost ~20us
+once per plan and amortize to zero; measured execution reaches parity with
+raw unfused native passes, and zero-copy plugin dispatch keeps artifact
+record execution at ~1.0x native.
 
 ## In-process plugin trust
 

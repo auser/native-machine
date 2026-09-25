@@ -50,6 +50,7 @@
 - [x] K-blocked panel matmul (L1-resident B slices, C accumulates in memory)
 - [x] fused matmul + activation kernel (`MATMUL_ACT`)
 - [x] chained plan executor with built-in operation fusion
+- [x] content-addressed compiled plans with O(1) execution dispatch
 - [x] zero-copy plugin record dispatch
 - [x] SIMD differential tests (NEON vs scalar reference oracles)
 - [x] resolve-once kernel handles for hot-loop dispatch
