@@ -129,6 +129,12 @@ once per plan and amortize to zero; measured execution reaches parity with
 raw unfused native passes, and zero-copy plugin dispatch keeps artifact
 record execution at ~1.0x native.
 
+Compiled plans are deduplicated through a bounded `PlanCache` keyed by their
+UOR address: `get_or_compile` compiles and inserts once per distinct plan
+(content-addressed deduplication), and `get` retrieves a plan by address
+with a fixed scan and no allocation. The cache is caller-owned with a hard
+capacity; a full cache is a typed error, never a silent eviction.
+
 ## In-process plugin trust
 
 Plugins are `dlopen`ed shared libraries running in the runtime's address

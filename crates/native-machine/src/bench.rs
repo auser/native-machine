@@ -460,6 +460,40 @@ fn bench_record_path(registry: &PluginRegistry, rows: &mut Vec<Row>) -> Result<(
         native_ns: Some(nanos(native_iterations, native_elapsed)),
         dispatched_ns: nanos(iterations, elapsed),
     });
+
+    // Steady-state path: the record compiles once into a cached plan;
+    // subsequent executions retrieve it by UOR address (O(1), no allocation)
+    // and dispatch pre-digested segments with no parsing.
+    let mut cache = ops::PlanCache::new();
+    let address = cache.get_or_compile(&record, size)?.identity()?;
+    let plan = cache
+        .get(&address)
+        .ok_or("cached plan missing after insert")?;
+    if cache.len() != 1 {
+        return Err("plan cache failed to deduplicate the compiled record".into());
+    }
+    ops::execute_compiled_plan(&mut arena, plan, &mut scratch, registry)?;
+    let (compiled_iterations, compiled_elapsed) = measure(|| {
+        if ops::execute_compiled_plan(
+            black_box(&mut arena),
+            black_box(plan),
+            black_box(&mut scratch),
+            registry,
+        )
+        .is_err()
+        {
+            failures.set(failures.get() + 1);
+        }
+    });
+    if failures.get() != 0 {
+        return Err("compiled record dispatch failed during benchmarking".into());
+    }
+    rows.push(Row {
+        label: format!("artifact record -> plugin ({size} f32, compiled)"),
+        elements: size as u64,
+        native_ns: Some(nanos(native_iterations, native_elapsed)),
+        dispatched_ns: nanos(compiled_iterations, compiled_elapsed),
+    });
     Ok(())
 }
 

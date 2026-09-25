@@ -33,6 +33,8 @@ pub enum ExecuteError {
     PlanLength { expected: usize, actual: usize },
     #[error("could not compute plan identity: {0}")]
     Identity(String),
+    #[error("plan cache is full (16 plans)")]
+    CacheFull,
     #[error("plugin dispatch failed: {0}")]
     Plugin(String),
 }
@@ -200,6 +202,7 @@ impl PlanSegment {
 /// the record stream once, groups records into segments, and extracts
 /// operands; execution then dispatches pre-digested segments in O(1) per
 /// operation with no record parsing and no heap allocation.
+#[derive(Clone, Copy)]
 pub struct CompiledPlan {
     segments: [PlanSegment; MAX_PLAN_SEGMENTS],
     segment_count: usize,
@@ -249,6 +252,103 @@ impl CompiledPlan {
         let outcome = uor_addr::json::address(json.as_bytes())
             .map_err(|error| ExecuteError::Identity(format!("{error:?}")))?;
         Ok(outcome.address.to_string())
+    }
+}
+
+/// Maximum plans held in a [`PlanCache`]; the cache is caller-owned and
+/// fixed-capacity, so lookups never allocate.
+pub const MAX_CACHED_PLANS: usize = 16;
+
+/// Longest accepted plan address string ("sha256:" plus 64 hex digits).
+const MAX_ADDRESS_BYTES: usize = 80;
+
+#[derive(Clone, Copy)]
+struct CacheEntry {
+    address: [u8; MAX_ADDRESS_BYTES],
+    address_len: usize,
+    plan: CompiledPlan,
+}
+
+impl CacheEntry {
+    fn address_bytes(&self) -> &[u8] {
+        &self.address[..self.address_len]
+    }
+}
+
+/// A bounded, content-addressed cache of compiled plans. Lookups by UOR
+/// address are a fixed scan of at most [`MAX_CACHED_PLANS`] entries with no
+/// allocation; compilation and insertion happen once per distinct plan.
+pub struct PlanCache {
+    entries: [Option<CacheEntry>; MAX_CACHED_PLANS],
+}
+
+impl PlanCache {
+    pub const fn new() -> Self {
+        Self {
+            entries: [None; MAX_CACHED_PLANS],
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.iter().flatten().count()
+    }
+
+    /// Returns the plan for a UOR address without allocating.
+    pub fn get(&self, address: &str) -> Option<&CompiledPlan> {
+        self.entries
+            .iter()
+            .flatten()
+            .find(|entry| entry.address_bytes() == address.as_bytes())
+            .map(|entry| &entry.plan)
+    }
+
+    /// Compiles, addresses, and caches a plan, returning the cached entry.
+    /// Compiling the same plan twice returns the existing entry: the content
+    /// address deduplicates plans.
+    pub fn get_or_compile(
+        &mut self,
+        records: &[u8],
+        input_length: usize,
+    ) -> Result<&CompiledPlan, ExecuteError> {
+        let plan = compile_plan(records, input_length)?;
+        let identity = plan.identity()?;
+        let bytes = identity.as_bytes();
+        if bytes.len() > MAX_ADDRESS_BYTES {
+            return Err(ExecuteError::Identity(identity));
+        }
+        let existing = self.entries.iter().position(|entry| {
+            entry
+                .as_ref()
+                .is_some_and(|entry| entry.address_bytes() == bytes)
+        });
+        if let Some(position) = existing {
+            return match self.entries[position].as_ref() {
+                Some(entry) => Ok(&entry.plan),
+                None => Err(ExecuteError::CacheFull),
+            };
+        }
+        let slot = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.is_none())
+            .ok_or(ExecuteError::CacheFull)?;
+        let mut address = [0_u8; MAX_ADDRESS_BYTES];
+        address[..bytes.len()].copy_from_slice(bytes);
+        *slot = Some(CacheEntry {
+            address,
+            address_len: bytes.len(),
+            plan,
+        });
+        match slot.as_ref() {
+            Some(entry) => Ok(&entry.plan),
+            None => Err(ExecuteError::CacheFull),
+        }
+    }
+}
+
+impl Default for PlanCache {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -830,6 +930,72 @@ mod tests {
         execute_compiled_plan(&mut arena, &plan, &mut scratch, &TestPlugin).expect("plan executes");
         let allocations = tracking.count();
         drop(tracking);
+        assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn plan_cache_deduplicates_by_content_address() {
+        let mut cache = PlanCache::new();
+        let records = chain_records(&[(1, 1.0), (PLUGIN_OPCODE, 0.0)], 2);
+        let first = cache
+            .get_or_compile(&records, 2)
+            .expect("plan compiles")
+            .identity()
+            .expect("identity computes");
+        let second = cache
+            .get_or_compile(&records, 2)
+            .expect("plan compiles")
+            .identity()
+            .expect("identity computes");
+        assert_eq!(first, second);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.get(&first).is_some());
+        assert!(cache.get("sha256:missing").is_none());
+    }
+
+    #[test]
+    fn plan_cache_is_bounded() {
+        let mut cache = PlanCache::new();
+        for index in 0..MAX_CACHED_PLANS {
+            let records = chain_records(&[(1, index as f32)], 2);
+            cache.get_or_compile(&records, 2).expect("plan compiles");
+        }
+        assert_eq!(cache.len(), MAX_CACHED_PLANS);
+        let records = chain_records(&[(1, 99.0)], 2);
+        assert!(matches!(
+            cache.get_or_compile(&records, 2),
+            Err(ExecuteError::CacheFull)
+        ));
+    }
+
+    #[test]
+    fn cached_plan_executes() {
+        let mut cache = PlanCache::new();
+        let records = chain_records(&[(1, 1.0), (PLUGIN_OPCODE, 0.0)], 2);
+        let mut arena = SessionArena::new();
+        arena.load_input(&[1.0, 2.0]).expect("input fits");
+        let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
+        {
+            let plan = cache.get_or_compile(&records, 2).expect("plan compiles");
+            execute_compiled_plan(&mut arena, plan, &mut scratch, &TestPlugin)
+                .expect("plan executes");
+        }
+        assert_eq!(arena.output(), &[4.0, 5.0]);
+    }
+
+    #[test]
+    fn plan_cache_hit_does_not_allocate() {
+        let mut cache = PlanCache::new();
+        let records = chain_records(&[(1, 1.0)], 2);
+        let address = {
+            let plan = cache.get_or_compile(&records, 2).expect("plan compiles");
+            plan.identity().expect("identity computes")
+        };
+        let tracking = crate::allocation::track();
+        let hit = cache.get(&address).is_some();
+        let allocations = tracking.count();
+        drop(tracking);
+        assert!(hit);
         assert_eq!(allocations, 0);
     }
 
