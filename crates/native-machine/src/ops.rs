@@ -6,6 +6,14 @@ use thiserror::Error;
 pub const OPERATION_SECTION: u32 = 1;
 pub const OPERATION_BYTES: usize = 16;
 pub const PLUGIN_OPCODE: u16 = 2;
+/// Plugin matmul record: bytes [2..4] kernel index, [4..8] m, [8..12] k,
+/// [12..16] n (u32 little-endian). Consumes m*k + k*n values (A||B row-major,
+/// contiguous), produces m*n.
+pub const PLUGIN_MATMUL_OPCODE: u16 = 3;
+/// Plugin fused matmul + activation record: bytes [2..4] kernel index,
+/// [4..6] m, [6..8] k, [8..10] n (u16 little-endian), [10..12] activation
+/// (0 = none, 1 = ReLU), [12..16] reserved (must be zero).
+pub const PLUGIN_MATMUL_ACT_OPCODE: u16 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Operation {
@@ -25,6 +33,8 @@ pub enum ExecuteError {
     UnknownOpcode(usize, u16),
     #[error("operation record {0} has incompatible lengths")]
     RecordLength(usize),
+    #[error("operation record {0} has invalid dimensions or reserved bytes")]
+    RecordDimensions(usize),
     #[error("operation record {0} breaks the input/output length chain")]
     RecordChain(usize),
     #[error("plan has more than 16 segments")]
@@ -41,6 +51,31 @@ pub enum ExecuteError {
 
 pub trait PluginDispatch {
     fn run_index(&self, index: usize, input: &[f32], output: &mut [f32]) -> Result<(), String>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_index_matmul(
+        &self,
+        index: usize,
+        a: &[f32],
+        b: &[f32],
+        output: &mut [f32],
+        m: u32,
+        k: u32,
+        n: u32,
+    ) -> Result<(), String>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_index_matmul_act(
+        &self,
+        index: usize,
+        a: &[f32],
+        b: &[f32],
+        output: &mut [f32],
+        m: u32,
+        k: u32,
+        n: u32,
+        activation: u32,
+    ) -> Result<(), String>;
 }
 
 #[cfg(test)]
@@ -189,6 +224,19 @@ enum PlanSegment {
     Plugin {
         index: u16,
     },
+    Matmul {
+        index: u16,
+        m: u32,
+        k: u32,
+        n: u32,
+    },
+    MatmulAct {
+        index: u16,
+        m: u16,
+        k: u16,
+        n: u16,
+        activation: u16,
+    },
 }
 
 impl PlanSegment {
@@ -245,6 +293,22 @@ impl CompiledPlan {
                 }
                 PlanSegment::Plugin { index } => {
                     json.push_str(&format!("{{\"kind\":\"plugin\",\"index\":{index}}}"));
+                }
+                PlanSegment::Matmul { index, m, k, n } => {
+                    json.push_str(&format!(
+                        "{{\"kind\":\"matmul\",\"index\":{index},\"m\":{m},\"k\":{k},\"n\":{n}}}"
+                    ));
+                }
+                PlanSegment::MatmulAct {
+                    index,
+                    m,
+                    k,
+                    n,
+                    activation,
+                } => {
+                    json.push_str(&format!(
+                        "{{\"kind\":\"matmul_act\",\"index\":{index},\"m\":{m},\"k\":{k},\"n\":{n},\"activation\":{activation}}}"
+                    ));
                 }
             }
         }
@@ -365,64 +429,125 @@ pub fn compile_plan(records: &[u8], input_length: usize) -> Result<CompiledPlan,
         segment_count: 0,
         length: input_length,
     };
+    let mut expected = input_length;
     for (index, record) in records.iter().enumerate() {
         let opcode = u16::from_le_bytes([record[0], record[1]]);
-        if !matches!(opcode, 0 | 1 | PLUGIN_OPCODE) {
-            return Err(ExecuteError::UnknownOpcode(index, opcode));
-        }
-        let record_length = u32::from_le_bytes(
-            record[8..12]
-                .try_into()
-                .map_err(|_| ExecuteError::RecordTruncated(index))?,
-        );
-        let output_length = u32::from_le_bytes(
-            record[12..16]
-                .try_into()
-                .map_err(|_| ExecuteError::RecordTruncated(index))?,
-        );
-        if record_length != output_length {
-            return Err(ExecuteError::RecordLength(index));
-        }
-        if usize::try_from(record_length).map_err(|_| ExecuteError::RecordLength(index))?
-            != input_length
-        {
-            return Err(ExecuteError::RecordChain(index));
-        }
-        if opcode == PLUGIN_OPCODE {
-            let plugin_index = u16::from_le_bytes([record[2], record[3]]);
-            plan.push(PlanSegment::Plugin {
-                index: plugin_index,
-            })?;
-            continue;
-        }
-        let needs_segment = !matches!(
-            plan.segments().last(),
-            Some(PlanSegment::Builtin { count, .. }) if *count < MAX_FUSED_OPERATIONS
-        );
-        if needs_segment {
-            plan.push(PlanSegment::EMPTY)?;
-        }
-        if opcode == 1 {
-            let value = f32::from_le_bytes(
-                record[4..8]
-                    .try_into()
-                    .map_err(|_| ExecuteError::RecordTruncated(index))?,
-            );
-            if let Some(PlanSegment::Builtin { operands, count }) = plan
-                .segments
-                .get_mut(plan.segment_count - 1)
-                .map(|segment| {
-                    debug_assert!(matches!(segment, PlanSegment::Builtin { .. }));
-                    segment
-                })
-            {
-                // count is only incremented here, immediately after a push or
-                // below the cap checked above, so indexing cannot overflow.
-                if *count < MAX_FUSED_OPERATIONS {
-                    operands[*count] = value;
-                    *count += 1;
+        match opcode {
+            0 | 1 | PLUGIN_OPCODE => {
+                let record_length = u32::from_le_bytes(
+                    record[8..12]
+                        .try_into()
+                        .map_err(|_| ExecuteError::RecordTruncated(index))?,
+                );
+                let output_length = u32::from_le_bytes(
+                    record[12..16]
+                        .try_into()
+                        .map_err(|_| ExecuteError::RecordTruncated(index))?,
+                );
+                if record_length != output_length {
+                    return Err(ExecuteError::RecordLength(index));
+                }
+                if usize::try_from(record_length).map_err(|_| ExecuteError::RecordLength(index))?
+                    != expected
+                {
+                    return Err(ExecuteError::RecordChain(index));
+                }
+                if opcode == PLUGIN_OPCODE {
+                    let plugin_index = u16::from_le_bytes([record[2], record[3]]);
+                    plan.push(PlanSegment::Plugin {
+                        index: plugin_index,
+                    })?;
+                    continue;
+                }
+                let needs_segment = !matches!(
+                    plan.segments().last(),
+                    Some(PlanSegment::Builtin { count, .. }) if *count < MAX_FUSED_OPERATIONS
+                );
+                if needs_segment {
+                    plan.push(PlanSegment::EMPTY)?;
+                }
+                if opcode == 1 {
+                    let value = f32::from_le_bytes(
+                        record[4..8]
+                            .try_into()
+                            .map_err(|_| ExecuteError::RecordTruncated(index))?,
+                    );
+                    if let Some(PlanSegment::Builtin { operands, count }) = plan
+                        .segments
+                        .get_mut(plan.segment_count - 1)
+                        .map(|segment| {
+                            debug_assert!(matches!(segment, PlanSegment::Builtin { .. }));
+                            segment
+                        })
+                    {
+                        // count is only incremented here, immediately after a
+                        // push or below the cap checked above.
+                        if *count < MAX_FUSED_OPERATIONS {
+                            operands[*count] = value;
+                            *count += 1;
+                        }
+                    }
                 }
             }
+            PLUGIN_MATMUL_OPCODE => {
+                let plugin_index = u16::from_le_bytes([record[2], record[3]]);
+                let m = u32::from_le_bytes(
+                    record[4..8]
+                        .try_into()
+                        .map_err(|_| ExecuteError::RecordTruncated(index))?,
+                );
+                let k = u32::from_le_bytes(
+                    record[8..12]
+                        .try_into()
+                        .map_err(|_| ExecuteError::RecordTruncated(index))?,
+                );
+                let n = u32::from_le_bytes(
+                    record[12..16]
+                        .try_into()
+                        .map_err(|_| ExecuteError::RecordTruncated(index))?,
+                );
+                if m == 0 || k == 0 || n == 0 {
+                    return Err(ExecuteError::RecordDimensions(index));
+                }
+                if u64::from(m) * u64::from(k) + u64::from(k) * u64::from(n) != expected as u64 {
+                    return Err(ExecuteError::RecordChain(index));
+                }
+                expected = usize::try_from(u64::from(m) * u64::from(n))
+                    .map_err(|_| ExecuteError::RecordLength(index))?;
+                plan.push(PlanSegment::Matmul {
+                    index: plugin_index,
+                    m,
+                    k,
+                    n,
+                })?;
+            }
+            PLUGIN_MATMUL_ACT_OPCODE => {
+                let plugin_index = u16::from_le_bytes([record[2], record[3]]);
+                let m = u16::from_le_bytes([record[4], record[5]]);
+                let k = u16::from_le_bytes([record[6], record[7]]);
+                let n = u16::from_le_bytes([record[8], record[9]]);
+                let activation = u16::from_le_bytes([record[10], record[11]]);
+                let reserved = u32::from_le_bytes(
+                    record[12..16]
+                        .try_into()
+                        .map_err(|_| ExecuteError::RecordTruncated(index))?,
+                );
+                if m == 0 || k == 0 || n == 0 || activation > 1 || reserved != 0 {
+                    return Err(ExecuteError::RecordDimensions(index));
+                }
+                if u64::from(m) * u64::from(k) + u64::from(k) * u64::from(n) != expected as u64 {
+                    return Err(ExecuteError::RecordChain(index));
+                }
+                expected = usize::from(m) * usize::from(n);
+                plan.push(PlanSegment::MatmulAct {
+                    index: plugin_index,
+                    m,
+                    k,
+                    n,
+                    activation,
+                })?;
+            }
+            other => return Err(ExecuteError::UnknownOpcode(index, other)),
         }
     }
     Ok(plan)
@@ -445,12 +570,20 @@ pub fn execute_compiled_plan<D: PluginDispatch>(
             actual: length,
         });
     }
-    if length > scratch.len() {
+    // Worst-case buffer requirement across the chain (compilation validated
+    // the chain, so only matmul segments change the length).
+    let mut required = length;
+    for segment in plan.segments() {
+        let (input_len, output_len) = segment_lengths(segment);
+        required = required.max(input_len).max(output_len);
+    }
+    if required > scratch.len() {
         return Err(ExecuteError::Arena(ArenaError::InputTooLarge {
-            required: length,
+            required,
             capacity: scratch.len(),
         }));
     }
+    let mut current_len = length;
     let mut source = ChainSource::ArenaInput;
     for segment in plan.segments() {
         match segment {
@@ -458,17 +591,17 @@ pub fn execute_compiled_plan<D: PluginDispatch>(
                 let operands = &operands[..*count];
                 match source {
                     ChainSource::ArenaInput => {
-                        let (input, output) = arena.input_and_output_mut(length)?;
+                        let (input, output) = arena.input_and_output_mut(current_len)?;
                         run_builtin_segment(operands, input, output);
                         source = ChainSource::ArenaOutput;
                     }
                     ChainSource::ArenaOutput => {
-                        run_builtin_segment(operands, arena.output(), &mut scratch[..length]);
+                        run_builtin_segment(operands, arena.output(), &mut scratch[..current_len]);
                         source = ChainSource::Scratch;
                     }
                     ChainSource::Scratch => {
-                        let output = arena.output_mut(length)?;
-                        run_builtin_segment(operands, &scratch[..length], output);
+                        let output = arena.output_mut(current_len)?;
+                        run_builtin_segment(operands, &scratch[..current_len], output);
                         source = ChainSource::ArenaOutput;
                     }
                 }
@@ -477,7 +610,7 @@ pub fn execute_compiled_plan<D: PluginDispatch>(
                 let plugin_index = usize::from(*index);
                 match source {
                     ChainSource::ArenaInput => {
-                        let (input, output) = arena.input_and_output_mut(length)?;
+                        let (input, output) = arena.input_and_output_mut(current_len)?;
                         plugins
                             .run_index(plugin_index, input, output)
                             .map_err(ExecuteError::Plugin)?;
@@ -485,26 +618,138 @@ pub fn execute_compiled_plan<D: PluginDispatch>(
                     }
                     ChainSource::ArenaOutput => {
                         plugins
-                            .run_index(plugin_index, arena.output(), &mut scratch[..length])
+                            .run_index(plugin_index, arena.output(), &mut scratch[..current_len])
                             .map_err(ExecuteError::Plugin)?;
                         source = ChainSource::Scratch;
                     }
                     ChainSource::Scratch => {
-                        let output = arena.output_mut(length)?;
+                        let output = arena.output_mut(current_len)?;
                         plugins
-                            .run_index(plugin_index, &scratch[..length], output)
+                            .run_index(plugin_index, &scratch[..current_len], output)
                             .map_err(ExecuteError::Plugin)?;
                         source = ChainSource::ArenaOutput;
                     }
                 }
             }
+            PlanSegment::Matmul { index, m, k, n } => {
+                let plugin_index = usize::from(*index);
+                let a_len = (*m * *k) as usize;
+                let b_len = (*k * *n) as usize;
+                let c_len = (*m * *n) as usize;
+                match source {
+                    ChainSource::ArenaInput => {
+                        let (input, output) = arena.input_and_output_mut(c_len)?;
+                        let (a, b) = input[..a_len + b_len].split_at(a_len);
+                        plugins
+                            .run_index_matmul(plugin_index, a, b, output, *m, *k, *n)
+                            .map_err(ExecuteError::Plugin)?;
+                        source = ChainSource::ArenaOutput;
+                    }
+                    ChainSource::ArenaOutput => {
+                        let (a, b) = arena.output()[..a_len + b_len].split_at(a_len);
+                        plugins
+                            .run_index_matmul(plugin_index, a, b, &mut scratch[..c_len], *m, *k, *n)
+                            .map_err(ExecuteError::Plugin)?;
+                        source = ChainSource::Scratch;
+                    }
+                    ChainSource::Scratch => {
+                        let (a, b) = scratch[..a_len + b_len].split_at(a_len);
+                        let output = arena.output_mut(c_len)?;
+                        plugins
+                            .run_index_matmul(plugin_index, a, b, output, *m, *k, *n)
+                            .map_err(ExecuteError::Plugin)?;
+                        source = ChainSource::ArenaOutput;
+                    }
+                }
+                current_len = c_len;
+            }
+            PlanSegment::MatmulAct {
+                index,
+                m,
+                k,
+                n,
+                activation,
+            } => {
+                let plugin_index = usize::from(*index);
+                let a_len = usize::from(*m) * usize::from(*k);
+                let b_len = usize::from(*k) * usize::from(*n);
+                let c_len = usize::from(*m) * usize::from(*n);
+                let activation = u32::from(*activation);
+                match source {
+                    ChainSource::ArenaInput => {
+                        let (input, output) = arena.input_and_output_mut(c_len)?;
+                        let (a, b) = input[..a_len + b_len].split_at(a_len);
+                        plugins
+                            .run_index_matmul_act(
+                                plugin_index,
+                                a,
+                                b,
+                                output,
+                                u32::from(*m),
+                                u32::from(*k),
+                                u32::from(*n),
+                                activation,
+                            )
+                            .map_err(ExecuteError::Plugin)?;
+                        source = ChainSource::ArenaOutput;
+                    }
+                    ChainSource::ArenaOutput => {
+                        let (a, b) = arena.output()[..a_len + b_len].split_at(a_len);
+                        plugins
+                            .run_index_matmul_act(
+                                plugin_index,
+                                a,
+                                b,
+                                &mut scratch[..c_len],
+                                u32::from(*m),
+                                u32::from(*k),
+                                u32::from(*n),
+                                activation,
+                            )
+                            .map_err(ExecuteError::Plugin)?;
+                        source = ChainSource::Scratch;
+                    }
+                    ChainSource::Scratch => {
+                        let (a, b) = scratch[..a_len + b_len].split_at(a_len);
+                        let output = arena.output_mut(c_len)?;
+                        plugins
+                            .run_index_matmul_act(
+                                plugin_index,
+                                a,
+                                b,
+                                output,
+                                u32::from(*m),
+                                u32::from(*k),
+                                u32::from(*n),
+                                activation,
+                            )
+                            .map_err(ExecuteError::Plugin)?;
+                        source = ChainSource::ArenaOutput;
+                    }
+                }
+                current_len = c_len;
+            }
         }
     }
     if matches!(source, ChainSource::Scratch) {
-        let output = arena.output_mut(length)?;
-        output.copy_from_slice(&scratch[..length]);
+        let output = arena.output_mut(current_len)?;
+        output.copy_from_slice(&scratch[..current_len]);
     }
     Ok(())
+}
+
+/// Input and output value counts for a shape-changing segment, used for
+/// capacity planning. Elementwise segments return (0, 0): their length
+/// equals the chain's current length, already accounted for.
+fn segment_lengths(segment: &PlanSegment) -> (usize, usize) {
+    match segment {
+        PlanSegment::Matmul { m, k, n, .. } => ((*m * *k + *k * *n) as usize, (*m * *n) as usize),
+        PlanSegment::MatmulAct { m, k, n, .. } => (
+            usize::from(*m) * usize::from(*k) + usize::from(*k) * usize::from(*n),
+            usize::from(*m) * usize::from(*n),
+        ),
+        _ => (0, 0),
+    }
 }
 
 /// Strip-mined fused pass over one compiled segment: the first AddScalar
@@ -742,6 +987,46 @@ mod tests {
             }
             for (source, destination) in input.iter().zip(output.iter_mut()) {
                 *destination = *source + 2.0;
+            }
+            Ok(())
+        }
+
+        fn run_index_matmul(
+            &self,
+            index: usize,
+            a: &[f32],
+            b: &[f32],
+            output: &mut [f32],
+            m: u32,
+            k: u32,
+            n: u32,
+        ) -> Result<(), String> {
+            self.run_index_matmul_act(index, a, b, output, m, k, n, 0)
+        }
+
+        fn run_index_matmul_act(
+            &self,
+            index: usize,
+            a: &[f32],
+            b: &[f32],
+            output: &mut [f32],
+            m: u32,
+            k: u32,
+            n: u32,
+            activation: u32,
+        ) -> Result<(), String> {
+            if index != 0 {
+                return Err("unexpected plugin".to_string());
+            }
+            let (m, k, n) = (m as usize, k as usize, n as usize);
+            for row in 0..m {
+                for column in 0..n {
+                    let mut sum = 0.0_f32;
+                    for inner in 0..k {
+                        sum += a[row * k + inner] * b[inner * n + column];
+                    }
+                    output[row * n + column] = if activation == 1 { sum.max(0.0) } else { sum };
+                }
             }
             Ok(())
         }
@@ -996,6 +1281,120 @@ mod tests {
         let allocations = tracking.count();
         drop(tracking);
         assert!(hit);
+        assert_eq!(allocations, 0);
+    }
+
+    fn matmul_record(m: u32, k: u32, n: u32) -> [u8; OPERATION_BYTES] {
+        let mut record = [0_u8; OPERATION_BYTES];
+        record[0..2].copy_from_slice(&PLUGIN_MATMUL_OPCODE.to_le_bytes());
+        record[4..8].copy_from_slice(&m.to_le_bytes());
+        record[8..12].copy_from_slice(&k.to_le_bytes());
+        record[12..16].copy_from_slice(&n.to_le_bytes());
+        record
+    }
+
+    fn matmul_act_record(m: u16, k: u16, n: u16, activation: u16) -> [u8; OPERATION_BYTES] {
+        let mut record = [0_u8; OPERATION_BYTES];
+        record[0..2].copy_from_slice(&PLUGIN_MATMUL_ACT_OPCODE.to_le_bytes());
+        record[4..6].copy_from_slice(&m.to_le_bytes());
+        record[6..8].copy_from_slice(&k.to_le_bytes());
+        record[8..10].copy_from_slice(&n.to_le_bytes());
+        record[10..12].copy_from_slice(&activation.to_le_bytes());
+        record
+    }
+
+    #[test]
+    fn matmul_plan_computes_through_plugin() {
+        let mut arena = SessionArena::new();
+        arena
+            .load_input(&[
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            ])
+            .expect("input fits");
+        let plan = compile_plan(&matmul_record(2, 3, 2), 12).expect("plan compiles");
+        let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
+        execute_compiled_plan(&mut arena, &plan, &mut scratch, &TestPlugin).expect("plan executes");
+        assert_eq!(arena.output(), &[58.0, 64.0, 139.0, 154.0]);
+    }
+
+    #[test]
+    fn matmul_act_plan_fuses_activation() {
+        let mut arena = SessionArena::new();
+        arena
+            .load_input(&[1.0, 2.0, 3.0, 4.0, -5.0, 6.0, 7.0, -8.0])
+            .expect("input fits");
+        let plan = compile_plan(&matmul_act_record(2, 2, 2, 1), 8).expect("plan compiles");
+        let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
+        execute_compiled_plan(&mut arena, &plan, &mut scratch, &TestPlugin).expect("plan executes");
+        assert_eq!(arena.output(), &[9.0, 0.0, 13.0, 0.0]);
+    }
+
+    #[test]
+    fn chained_matmul_then_elementwise() {
+        let mut arena = SessionArena::new();
+        arena
+            .load_input(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+            .expect("input fits");
+        let mut records = Vec::from(matmul_record(2, 2, 2));
+        records.extend_from_slice(&chain_records(&[(1, 1.0)], 4));
+        let plan = compile_plan(&records, 8).expect("plan compiles");
+        let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
+        execute_compiled_plan(&mut arena, &plan, &mut scratch, &TestPlugin).expect("plan executes");
+        assert_eq!(arena.output(), &[20.0, 23.0, 44.0, 51.0]);
+    }
+
+    #[test]
+    fn matmul_record_rejects_chain_mismatch() {
+        assert!(matches!(
+            compile_plan(&matmul_record(3, 2, 2), 8),
+            Err(ExecuteError::RecordChain(0))
+        ));
+    }
+
+    #[test]
+    fn matmul_act_record_rejects_bad_fields() {
+        assert!(matches!(
+            compile_plan(&matmul_act_record(2, 2, 2, 2), 8),
+            Err(ExecuteError::RecordDimensions(0))
+        ));
+        let mut record = matmul_act_record(2, 2, 2, 1);
+        record[12] = 1;
+        assert!(matches!(
+            compile_plan(&record, 8),
+            Err(ExecuteError::RecordDimensions(0))
+        ));
+    }
+
+    #[test]
+    fn matmul_segments_shape_plan_identity() {
+        let first = compile_plan(&matmul_record(2, 2, 2), 8)
+            .expect("plan compiles")
+            .identity()
+            .expect("identity computes");
+        let second = compile_plan(&matmul_record(2, 2, 2), 8)
+            .expect("plan compiles")
+            .identity()
+            .expect("identity computes");
+        let different = compile_plan(&matmul_record(3, 2, 2), 10)
+            .expect("plan compiles")
+            .identity()
+            .expect("identity computes");
+        assert_eq!(first, second);
+        assert_ne!(first, different);
+    }
+
+    #[test]
+    fn matmul_plan_execution_does_not_allocate() {
+        let mut arena = SessionArena::new();
+        arena
+            .load_input(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+            .expect("input fits");
+        let plan = compile_plan(&matmul_act_record(2, 2, 2, 1), 8).expect("plan compiles");
+        let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
+        let tracking = crate::allocation::track();
+        execute_compiled_plan(&mut arena, &plan, &mut scratch, &TestPlugin).expect("plan executes");
+        let allocations = tracking.count();
+        drop(tracking);
         assert_eq!(allocations, 0);
     }
 

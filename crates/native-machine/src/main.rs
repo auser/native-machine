@@ -67,12 +67,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             arena.load_input(&values[..value_count])?;
             let mut scratch = [0.0_f32; arena::MAX_VALUES];
             let plugins = plugin::load_registry(&config)?;
-            ops::execute_records_with_plugins(
-                &mut arena,
-                operation_section.bytes,
-                &mut scratch,
-                &plugins,
-            )?;
+            // Compile the artifact's operation section once, then dispatch
+            // the pre-digested plan (O(1) per operation, no per-record
+            // parsing at execution).
+            let plan = ops::compile_plan(operation_section.bytes, value_count)?;
+            ops::execute_compiled_plan(&mut arena, &plan, &mut scratch, &plugins)?;
             println!(
                 "executed artifact {} with input {}: {:?}",
                 artifact.display(),

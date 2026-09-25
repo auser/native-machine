@@ -52,6 +52,7 @@
 - [x] chained plan executor with built-in operation fusion
 - [x] content-addressed compiled plans with O(1) execution dispatch
 - [x] bounded UOR-addressed plan cache with allocation-free hits
+- [x] typed kernel records in plans (matmul, fused matmul+activation)
 - [x] zero-copy plugin record dispatch
 - [x] SIMD differential tests (NEON vs scalar reference oracles)
 - [x] resolve-once kernel handles for hot-loop dispatch

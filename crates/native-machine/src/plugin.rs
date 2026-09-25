@@ -368,6 +368,45 @@ impl crate::ops::PluginDispatch for PluginRegistry {
     fn run_index(&self, index: usize, input: &[f32], output: &mut [f32]) -> Result<(), String> {
         PluginRegistry::run_index(self, index, input, output).map_err(|error| error.to_string())
     }
+
+    fn run_index_matmul(
+        &self,
+        index: usize,
+        a: &[f32],
+        b: &[f32],
+        output: &mut [f32],
+        m: u32,
+        k: u32,
+        n: u32,
+    ) -> Result<(), String> {
+        self.entries
+            .get(index)
+            .ok_or_else(|| PluginError::NotFound(index.to_string()).to_string())?
+            .plugin
+            .kernel
+            .run_matmul(a, b, output, m, k, n)
+            .map_err(|error| error.to_string())
+    }
+
+    fn run_index_matmul_act(
+        &self,
+        index: usize,
+        a: &[f32],
+        b: &[f32],
+        output: &mut [f32],
+        m: u32,
+        k: u32,
+        n: u32,
+        activation: u32,
+    ) -> Result<(), String> {
+        self.entries
+            .get(index)
+            .ok_or_else(|| PluginError::NotFound(index.to_string()).to_string())?
+            .plugin
+            .kernel
+            .run_matmul_act(a, b, output, m, k, n, activation)
+            .map_err(|error| error.to_string())
+    }
 }
 
 impl LoadedKernel {
@@ -687,6 +726,38 @@ pub fn demo(config: &Config) -> Result<(), PluginError> {
     match registry.run_f32("reference-relu", &relu_input, &mut short_output) {
         Err(error) => println!("rejected undersized output: {error}"),
         Ok(()) => return Err(PluginError::Demo("relu accepted an undersized output")),
+    }
+
+    // End-to-end plan: compile a fused matmul + ReLU record and execute it
+    // through the compiled-plan executor.
+    if let Some(fused_index) = registry.kernel_index("avx2-fma-matmul-act") {
+        let mut record = [0_u8; crate::ops::OPERATION_BYTES];
+        record[0..2].copy_from_slice(&crate::ops::PLUGIN_MATMUL_ACT_OPCODE.to_le_bytes());
+        record[2..4].copy_from_slice(
+            &u16::try_from(fused_index)
+                .map_err(|_| PluginError::Demo("fused kernel index does not fit u16"))?
+                .to_le_bytes(),
+        );
+        record[4..6].copy_from_slice(&2_u16.to_le_bytes());
+        record[6..8].copy_from_slice(&2_u16.to_le_bytes());
+        record[8..10].copy_from_slice(&2_u16.to_le_bytes());
+        record[10..12].copy_from_slice(&1_u16.to_le_bytes());
+        let plan = crate::ops::compile_plan(&record, 8)
+            .map_err(|_| PluginError::Demo("fused plan failed to compile"))?;
+        let mut arena = crate::arena::SessionArena::new();
+        arena
+            .load_input(&[1.0, 2.0, 3.0, 4.0, -5.0, 6.0, 7.0, -8.0])
+            .map_err(|_| PluginError::Demo("fused plan input does not fit the arena"))?;
+        let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
+        crate::ops::execute_compiled_plan(&mut arena, &plan, &mut scratch, &registry)
+            .map_err(|_| PluginError::Demo("fused plan failed to execute"))?;
+        let identity = plan
+            .identity()
+            .map_err(|_| PluginError::Demo("fused plan identity failed"))?;
+        println!(
+            "compiled plan matmul+relu([1 2; 3 4], [-5 6; 7 -8]) = {:?}\nplan identity: {identity}",
+            arena.output()
+        );
     }
     println!("kernel demo: passed");
     Ok(())

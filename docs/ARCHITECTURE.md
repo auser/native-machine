@@ -114,6 +114,19 @@ the admitted kernel table. Kernels provide primitives; plans compose them.
 The ABI governs kernels, not plans: changing a plan never changes a kernel's
 contract.
 
+Plan records are 16 bytes. Built-in opcodes cover Copy and AddScalar; plugin
+opcodes dispatch elementwise (`2`), matmul (`3`: kernel index plus `m`, `k`,
+`n` as `u32`), and fused matmul + activation (`4`: index plus `u16`
+dimensions, a `u16` activation kind, and a reserved zero word). Plans are
+chains: each record consumes the previous record's output, so a matmul
+record consumes `m*k + k*n` values (A||B row-major contiguous) and produces
+`m*n`, and compilation validates every link before execution. The session
+arena is `f32`-typed, so `u64` kernels (xor-shift-add) dispatch through the
+typed registry methods rather than plan records. `native-machine run`
+compiles the artifact's operation section once and executes the compiled
+plan, which also means multi-record artifacts now chain rather than
+re-reading the original input per record.
+
 Fusion exists at both levels. Kernel-level fusion is a new operation kind
 (`MATMUL_ACT`): the activation is applied to accumulators before the single
 output store. Plan-level fusion is a two-phase design: `compile_plan`
