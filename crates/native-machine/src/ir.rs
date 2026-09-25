@@ -209,7 +209,7 @@ impl IrPlan {
         input: &[f32],
         registry: &PluginRegistry,
         scratch: &mut [f32],
-    ) -> Result<(), IrError> {
+    ) -> Result<Vec<f32>, IrError> {
         if input.len() > crate::arena::MAX_VALUES {
             return Err(IrError::InputTooLarge {
                 required: input.len(),
@@ -245,7 +245,7 @@ impl IrPlan {
                 });
             }
         }
-        Ok(())
+        Ok(output.to_vec())
     }
 }
 
@@ -337,8 +337,10 @@ mod tests {
         plan.push(IrOp::AddScalar { value: 0.5 });
         let input = [1.0_f32, 2.0, 3.0, 4.0, -5.0, 6.0, 7.0, -8.0];
         let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
-        plan.certify(&input, &registry, &mut scratch)
+        let output = plan
+            .certify(&input, &registry, &mut scratch)
             .expect("plan certifies");
+        assert_eq!(output, vec![9.5, 0.5, 13.5, 0.5]);
     }
 
     #[test]

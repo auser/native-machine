@@ -737,35 +737,54 @@ pub fn demo(config: &Config) -> Result<(), PluginError> {
         Ok(()) => return Err(PluginError::Demo("relu accepted an undersized output")),
     }
 
-    // End-to-end plan: compile a fused matmul + ReLU record and execute it
-    // through the compiled-plan executor.
-    if let Some(fused_index) = registry.kernel_index("avx2-fma-matmul-act") {
-        let mut record = [0_u8; crate::ops::OPERATION_BYTES];
-        record[0..2].copy_from_slice(&crate::ops::PLUGIN_MATMUL_ACT_OPCODE.to_le_bytes());
-        record[2..4].copy_from_slice(
-            &u16::try_from(fused_index)
-                .map_err(|_| PluginError::Demo("fused kernel index does not fit u16"))?
-                .to_le_bytes(),
-        );
-        record[4..6].copy_from_slice(&2_u16.to_le_bytes());
-        record[6..8].copy_from_slice(&2_u16.to_le_bytes());
-        record[8..10].copy_from_slice(&2_u16.to_le_bytes());
-        record[10..12].copy_from_slice(&1_u16.to_le_bytes());
-        let plan = crate::ops::compile_plan(&record, 8)
-            .map_err(|_| PluginError::Demo("fused plan failed to compile"))?;
-        let mut arena = crate::arena::SessionArena::new();
-        arena
-            .load_input(&[1.0, 2.0, 3.0, 4.0, -5.0, 6.0, 7.0, -8.0])
-            .map_err(|_| PluginError::Demo("fused plan input does not fit the arena"))?;
+    // End-to-end plans in the IR: certify an unfused chain (copy, matmul,
+    // relu) and the fused equivalent (matmul+activation), and show both
+    // produce identical certified output through the runtime.
+    let matmul = ["avx2-fma-matmul", "neon-matmul", "reference-matmul"]
+        .into_iter()
+        .find(|name| registry.kernel_index(name).is_some());
+    let relu = ["avx2-relu", "neon-relu", "reference-relu"]
+        .into_iter()
+        .find(|name| registry.kernel_index(name).is_some());
+    let fused = registry.kernel_index("avx2-fma-matmul-act");
+    if let (Some(matmul), Some(relu), Some(_)) = (matmul, relu, fused) {
+        let input = [1.0_f32, 2.0, 3.0, 4.0, -5.0, 6.0, 7.0, -8.0];
+        let mut unfused = crate::ir::IrPlan::new();
+        unfused.push(crate::ir::IrOp::Copy);
+        unfused.push(crate::ir::IrOp::Matmul {
+            kernel: matmul.to_owned(),
+            m: 2,
+            k: 2,
+            n: 2,
+        });
+        unfused.push(crate::ir::IrOp::PluginElementwise {
+            kernel: relu.to_owned(),
+        });
+        unfused.push(crate::ir::IrOp::AddScalar { value: 0.5 });
+        let mut fused = crate::ir::IrPlan::new();
+        fused.push(crate::ir::IrOp::MatmulAct {
+            kernel: "avx2-fma-matmul-act".to_owned(),
+            m: 2,
+            k: 2,
+            n: 2,
+            activation: 1,
+        });
+        fused.push(crate::ir::IrOp::AddScalar { value: 0.5 });
         let mut scratch = [0.0_f32; crate::arena::MAX_VALUES];
-        crate::ops::execute_compiled_plan(&mut arena, &plan, &mut scratch, &registry)
-            .map_err(|_| PluginError::Demo("fused plan failed to execute"))?;
-        let identity = plan
-            .identity()
-            .map_err(|_| PluginError::Demo("fused plan identity failed"))?;
+        let unfused_output = unfused
+            .certify(&input, &registry, &mut scratch)
+            .map_err(|_| PluginError::Demo("unfused plan failed certification"))?;
+        let fused_output = fused
+            .certify(&input, &registry, &mut scratch)
+            .map_err(|_| PluginError::Demo("fused plan failed certification"))?;
+        if unfused_output != fused_output {
+            return Err(PluginError::Demo("fused and unfused plans diverged"));
+        }
         println!(
-            "compiled plan matmul+relu([1 2; 3 4], [-5 6; 7 -8]) = {:?}\nplan identity: {identity}",
-            arena.output()
+            "certified IR plans ({} ops unfused, {} ops fused): matmul+relu+0.5 = {:?}",
+            unfused.ops().len(),
+            fused.ops().len(),
+            fused_output
         );
     }
     println!("kernel demo: passed");
