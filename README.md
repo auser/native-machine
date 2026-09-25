@@ -171,7 +171,7 @@ just bench        # benchmark kernel dispatch against native baselines
 just build-all    # CI plus release builds and plugin build
 just package      # build crates and package them
 just release-check
-just release version=0.1.0
+just release 0.1.0
 ```
 
 `just release` requires a clean, merged `main` checkout. It creates and pushes
