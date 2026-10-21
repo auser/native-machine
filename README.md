@@ -137,6 +137,7 @@ native-machine artifact create-fixture ./fixture.nm
 native-machine artifact validate ./fixture.nm
 native-machine artifact inspect ./fixture.nm
 native-machine artifact stream ./fixture.nm --buffer-bytes 4096
+native-machine artifact cache ./fixture.nm --entries 64 --cache-bytes 1048576
 native-machine run --artifact ./fixture.nm --input ./input.f32le
 ```
 

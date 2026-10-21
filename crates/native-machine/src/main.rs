@@ -4,6 +4,7 @@ mod allocation;
 mod arena;
 mod artifact;
 mod bench;
+mod cache;
 mod cli;
 mod config;
 mod cpu;
@@ -46,6 +47,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             cli::ArtifactCommand::Stream { path, buffer_bytes } => {
                 stream_artifact(Path::new(&path), buffer_bytes)?
             }
+            cli::ArtifactCommand::Cache {
+                path,
+                entries,
+                cache_bytes,
+            } => cache_artifact(Path::new(&path), entries, cache_bytes)?,
             cli::ArtifactCommand::CreateFixture { path } => {
                 artifact::create_fixture(Path::new(&path))?
             }
@@ -167,6 +173,42 @@ fn stream_artifact(path: &Path, buffer_bytes: usize) -> Result<(), Box<dyn Error
         path.display(),
         chunk_count,
         buffer_bytes
+    );
+    Ok(())
+}
+
+fn cache_artifact(
+    path: &Path,
+    entry_capacity: usize,
+    byte_capacity: usize,
+) -> Result<(), Box<dyn Error>> {
+    let mapped = artifact::MappedArtifact::open(path, u64::MAX)?;
+    let artifact = mapped.view()?;
+    let tensors = artifact
+        .tensors()?
+        .ok_or("artifact has no tensor sections")?;
+    let identities = identity::derive(&artifact)?;
+    let mut entries = vec![cache::TileCacheEntry::EMPTY; entry_capacity];
+    let mut storage = vec![0_u8; byte_capacity];
+    let mut cache = cache::TileCache::new(&mut entries, &mut storage);
+    let mut hits = 0_usize;
+    for (index, tensor_identity) in identities.tensors.iter().enumerate() {
+        let tensor = tensors
+            .get(index)?
+            .ok_or("validated tensor disappeared while caching")?;
+        if cache.insert(&tensor_identity.tile_address, tensor.bytes)? == cache::InsertStatus::Hit {
+            hits += 1;
+        }
+        if cache.get(&tensor_identity.tile_address) != Some(tensor.bytes) {
+            return Err("cached tile bytes do not match the admitted tensor".into());
+        }
+    }
+    println!(
+        "cached {} unique tile(s), {} bytes from {} ({} shared-range hit(s))",
+        cache.len(),
+        cache.used_bytes(),
+        path.display(),
+        hits
     );
     Ok(())
 }

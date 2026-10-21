@@ -72,7 +72,7 @@
 - [x] immutable tensor metadata and encoded-tile artifact sections (raw `f32` codec)
 - [x] bounded sequential weight stream with typed exhaustion
 - [x] UOR-addressed model, tensor, layer, and tile identities
-- [ ] bounded content-addressed tile cache
+- [x] bounded content-addressed tile cache
 - [ ] encoded-tile kernel contract with reference raw codec
 - [ ] separate logical, encoded, cache-hit, and measured physical byte accounting
 - [ ] fixed-capacity key-value cache accounting

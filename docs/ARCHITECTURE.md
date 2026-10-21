@@ -200,6 +200,14 @@ deliberately outside the model address; `artifact inspect` reports both this
 semantic model address and the existing SHA-256 identity of the complete
 artifact bytes.
 
+`TileCache` holds encoded tile bytes under those UOR tile addresses. Both its
+entry table and byte storage are supplied by the caller, so capacity is known
+before loading and the cache itself never allocates. Re-inserting the same
+address and bytes is a hit; the same address with different bytes is a typed
+collision error. Exhausting either entries or byte storage is also a typed
+error, and there is no implicit eviction. `artifact cache` exercises this
+contract with explicit `--entries` and `--cache-bytes` bounds.
+
 ## In-process plugin trust
 
 Plugins are `dlopen`ed shared libraries running in the runtime's address

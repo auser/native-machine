@@ -70,6 +70,14 @@ pub enum ArtifactCommand {
         #[arg(long, default_value_t = 4096, value_name = "BYTES")]
         buffer_bytes: usize,
     },
+    /// Load admitted encoded tiles into a bounded content-addressed cache.
+    Cache {
+        path: PathBuf,
+        #[arg(long, default_value_t = 64)]
+        entries: usize,
+        #[arg(long, default_value_t = 1_048_576, value_name = "BYTES")]
+        cache_bytes: usize,
+    },
     CreateFixture {
         path: PathBuf,
     },
