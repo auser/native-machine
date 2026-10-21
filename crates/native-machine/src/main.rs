@@ -8,6 +8,7 @@ mod cli;
 mod config;
 mod cpu;
 mod host;
+mod identity;
 mod ir;
 mod ops;
 mod plugin;

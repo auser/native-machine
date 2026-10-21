@@ -624,26 +624,39 @@ pub fn validate(path: &Path) -> Result<(), ArtifactError> {
     Ok(())
 }
 
-pub fn inspect(path: &Path) -> Result<(), ArtifactError> {
+pub fn inspect(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mapped = MappedArtifact::open(path, u64::MAX)?;
     let artifact = mapped.view()?;
+    let identities = crate::identity::derive(&artifact)?;
     let (tensor_count, tensor_bytes) = match artifact.tensors()? {
         Some(tensors) => (tensors.len(), tensors.logical_bytes()?),
         None => (0, 0),
     };
     println!(
-        "artifact: {}\nidentity: {}\nprovenance: {}\nversion: {}\nsections: {}\ntensors: {}\ntensor bytes: {}\nbytes: {}",
+        "artifact: {}\nidentity: {}\nmodel identity: {}\nprovenance: {}\nversion: {}\nsections: {}\nlayers: {}\ntensors: {}\ntiles: {}\ntensor bytes: {}\nbytes: {}",
         path.display(),
         artifact.identity()?,
+        identities.model,
         artifact
             .provenance_identity()?
             .unwrap_or_else(|| "none".to_string()),
         artifact.header.version,
         artifact.header.section_count,
+        identities.layers.len(),
         tensor_count,
+        identities.tiles.len(),
         tensor_bytes,
         artifact.header.artifact_bytes
     );
+    for layer in identities.layers {
+        println!("layer {} identity: {}", layer.index, layer.address);
+    }
+    for tensor in identities.tensors {
+        println!(
+            "tensor {} identity: {} (tile {})",
+            tensor.id, tensor.address, tensor.tile_address
+        );
+    }
     Ok(())
 }
 
@@ -1145,6 +1158,13 @@ mod tests {
             .tensors()
             .expect("tensor table parses")
             .expect("tensor table exists");
+        let identities = crate::identity::derive(&artifact).expect("identities derive");
+        assert_eq!(identities.tiles.len(), 1);
+        assert_eq!(identities.tensors.len(), 2);
+        assert_eq!(
+            identities.tensors[0].tile_address,
+            identities.tensors[1].tile_address
+        );
         let mut stream = TensorStream::new(tensors);
         let mut buffer = [0_u8; 4];
 

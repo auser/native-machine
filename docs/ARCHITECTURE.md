@@ -189,6 +189,17 @@ once. The steady-state read path performs no heap allocation. The
 `artifact stream PATH --buffer-bytes N` command exercises this contract and
 reports its encoded byte and chunk counts.
 
+The admitted content graph has UOR addresses at four levels. A tile address
+binds its codec, element type, encoded length, and encoded-byte digest; a
+tensor address binds its active shape to that tile address; and a layer
+address binds one fixed operation record. The model address binds the ordered
+layer addresses and the sorted mapping from tensor IDs to tensor addresses.
+This makes exact shared tile ranges converge on one tile address while keeping
+their tensor roles explicit in the model. Provenance and container padding are
+deliberately outside the model address; `artifact inspect` reports both this
+semantic model address and the existing SHA-256 identity of the complete
+artifact bytes.
+
 ## In-process plugin trust
 
 Plugins are `dlopen`ed shared libraries running in the runtime's address

@@ -71,7 +71,7 @@
 - [x] deterministic bytes-per-pass ceiling from a named bandwidth tier
 - [x] immutable tensor metadata and encoded-tile artifact sections (raw `f32` codec)
 - [x] bounded sequential weight stream with typed exhaustion
-- [ ] UOR-addressed model, tensor, layer, and tile identities
+- [x] UOR-addressed model, tensor, layer, and tile identities
 - [ ] bounded content-addressed tile cache
 - [ ] encoded-tile kernel contract with reference raw codec
 - [ ] separate logical, encoded, cache-hit, and measured physical byte accounting
