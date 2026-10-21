@@ -136,6 +136,8 @@ Create and validate a local artifact fixture:
 native-machine artifact create-fixture ./fixture.nm
 native-machine artifact validate ./fixture.nm
 native-machine artifact inspect ./fixture.nm
+native-machine artifact stream ./fixture.nm --buffer-bytes 4096
+native-machine artifact cache ./fixture.nm --entries 64 --cache-bytes 1048576
 native-machine run --artifact ./fixture.nm --input ./input.f32le
 ```
 
@@ -147,6 +149,17 @@ printf 'input 8\nmatmul avx2-fma-matmul 2 2 2\nelementwise reference-relu\n' > p
 native-machine artifact create-plan plan.txt plan.nm
 native-machine run --artifact plan.nm --input ./matmul-input.f32le
 ```
+
+Supply a measured bandwidth to print the transport-bound throughput ceiling
+for the trace's logical bytes per pass:
+
+```text
+native-machine run --artifact plan.nm --input ./matmul-input.f32le \
+  --transport-tier memory --transport-bandwidth-gbps 96
+```
+
+The ceiling is not a benchmark: it uses the deterministic semantic-minimum byte
+count, while actual cache-line and device traffic must be measured separately.
 
 `input.f32le` is a caller-created file containing little-endian `f32` values.
 The runtime bounds it to the fixed session arena before execution.

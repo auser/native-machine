@@ -4,13 +4,17 @@ mod allocation;
 mod arena;
 mod artifact;
 mod bench;
+mod cache;
 mod cli;
 mod config;
 mod cpu;
 mod host;
+mod identity;
 mod ir;
 mod ops;
 mod plugin;
+mod stream;
+mod transport;
 
 use clap::{CommandFactory, Parser};
 use cli::{Cli, Command};
@@ -40,6 +44,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some(Command::Artifact { command }) => match command {
             cli::ArtifactCommand::Inspect { path } => artifact::inspect(Path::new(&path))?,
             cli::ArtifactCommand::Validate { path } => artifact::validate(Path::new(&path))?,
+            cli::ArtifactCommand::Stream { path, buffer_bytes } => {
+                stream_artifact(Path::new(&path), buffer_bytes)?
+            }
+            cli::ArtifactCommand::Cache {
+                path,
+                entries,
+                cache_bytes,
+            } => cache_artifact(Path::new(&path), entries, cache_bytes)?,
             cli::ArtifactCommand::CreateFixture { path } => {
                 artifact::create_fixture(Path::new(&path))?
             }
@@ -62,7 +74,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 println!("compiled plan {} -> {}", source.display(), output.display());
             }
         },
-        Some(Command::Run(cli::RunArgs { artifact, input })) => {
+        Some(Command::Run(cli::RunArgs {
+            artifact,
+            input,
+            transport_bandwidth_gbps,
+            transport_tier,
+            tokens_per_pass,
+        })) => {
             let mapped =
                 artifact::MappedArtifact::open(Path::new(&artifact), config.max_artifact_bytes)?;
             let view = mapped.view()?;
@@ -107,8 +125,90 @@ fn main() -> Result<(), Box<dyn Error>> {
                 trace.bytes_read(),
                 trace.bytes_written()
             );
+            if let Some(bandwidth_gbps) = transport_bandwidth_gbps {
+                let tier = match transport_tier {
+                    cli::TransportTierArg::Memory => transport::TransportTier::Memory,
+                    cli::TransportTierArg::Storage => transport::TransportTier::Storage,
+                };
+                let bound = transport::TransportBound::new(
+                    tier,
+                    bandwidth_gbps * 1_000_000_000.0,
+                    trace.bytes_read(),
+                    tokens_per_pass,
+                )?;
+                println!(
+                    "transport ceiling: {:.3} tokens/s at {} GB/s {} bandwidth, {} logical bytes/pass, {} token(s)/pass",
+                    bound.tokens_per_second_ceiling(),
+                    bandwidth_gbps,
+                    bound.tier,
+                    bound.bytes_per_pass,
+                    bound.tokens_per_pass
+                );
+            }
         }
         None => Cli::command().print_help()?,
     }
+    Ok(())
+}
+
+fn stream_artifact(path: &Path, buffer_bytes: usize) -> Result<(), Box<dyn Error>> {
+    let mapped = artifact::MappedArtifact::open(path, u64::MAX)?;
+    let artifact = mapped.view()?;
+    let tensors = artifact
+        .tensors()?
+        .ok_or("artifact has no tensor sections")?;
+    let mut buffer = vec![0_u8; buffer_bytes];
+    let mut stream = stream::TensorStream::new(tensors);
+    let mut chunk_count = 0_u64;
+    loop {
+        match stream.read_next(&mut buffer) {
+            Ok(_) => chunk_count += 1,
+            Err(stream::StreamError::Exhausted) => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    println!(
+        "streamed {} encoded bytes from {} in {} chunk(s) with a {}-byte buffer",
+        stream.bytes_read(),
+        path.display(),
+        chunk_count,
+        buffer_bytes
+    );
+    Ok(())
+}
+
+fn cache_artifact(
+    path: &Path,
+    entry_capacity: usize,
+    byte_capacity: usize,
+) -> Result<(), Box<dyn Error>> {
+    let mapped = artifact::MappedArtifact::open(path, u64::MAX)?;
+    let artifact = mapped.view()?;
+    let tensors = artifact
+        .tensors()?
+        .ok_or("artifact has no tensor sections")?;
+    let identities = identity::derive(&artifact)?;
+    let mut entries = vec![cache::TileCacheEntry::EMPTY; entry_capacity];
+    let mut storage = vec![0_u8; byte_capacity];
+    let mut cache = cache::TileCache::new(&mut entries, &mut storage);
+    let mut hits = 0_usize;
+    for (index, tensor_identity) in identities.tensors.iter().enumerate() {
+        let tensor = tensors
+            .get(index)?
+            .ok_or("validated tensor disappeared while caching")?;
+        if cache.insert(&tensor_identity.tile_address, tensor.bytes)? == cache::InsertStatus::Hit {
+            hits += 1;
+        }
+        if cache.get(&tensor_identity.tile_address) != Some(tensor.bytes) {
+            return Err("cached tile bytes do not match the admitted tensor".into());
+        }
+    }
+    println!(
+        "cached {} unique tile(s), {} bytes from {} ({} shared-range hit(s))",
+        cache.len(),
+        cache.used_bytes(),
+        path.display(),
+        hits
+    );
     Ok(())
 }

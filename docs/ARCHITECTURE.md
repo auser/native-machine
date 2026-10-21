@@ -26,6 +26,19 @@ kernel table once, and executes bounded operations over caller-owned state.
 - Provenance payloads are canonicalized through `uor-addr` so equivalent JSON
   representations receive the same provenance identity.
 
+Artifacts may also carry a tensor metadata section (kind 3) paired with an
+immutable tile-data section (kind 4). Tensor records are fixed-width 48-byte
+records sorted by tensor ID: ID, element type, codec, rank, four dimensions,
+and the tile range relative to the tile-data section. Version 1 admits only
+raw little-endian `f32` tensors, so every active dimension is nonzero, unused
+dimensions are zero, tile offsets are four-byte aligned, and the byte length
+must equal the shape's element count times four. Admission rejects missing
+section pairs, duplicate or unsorted IDs, unsupported codecs, malformed
+shapes, out-of-range tiles, gaps, unreferenced bytes, and partial overlaps.
+Exact shared ranges are allowed so tied tensors can name the same immutable
+bytes. Validated tensor lookup returns borrowed slices into the mapped
+artifact; it does not copy or decode tile data.
+
 ## Kernel plugin model
 
 The current ABI is version 3. The host resolves only
@@ -158,6 +171,42 @@ explicit (a fused three-operation chain accounts 32 KiB against 96 KiB for
 the unfused passes). The trace is allocation-free and costs one branch per
 segment when disabled. `native-machine run` prints the trace summary after
 execution.
+
+The same logical byte count can define a transport ceiling. When `run` receives
+`--transport-bandwidth-gbps`, it reports
+`tokens_per_pass * bandwidth / logical_bytes_per_pass` for the named memory or
+storage tier. This is deliberately an upper bound: logical traffic is the
+semantic minimum, while cache-line traffic, page faults, prefetch behavior, and
+sustained bandwidth remain hardware measurements. A result must not be
+reported as achieved throughput without a separate timing measurement.
+
+Admitted tensor tiles can be traversed through a forward-only `TensorStream`.
+The caller supplies a fixed-capacity, `f32`-aligned byte buffer; each read
+returns deterministic tensor and offset metadata, and completion is the typed
+`Exhausted` result. Exact shared ranges used by tied weights are transported
+for their first tensor only, so every physical encoded byte crosses the stream
+once. The steady-state read path performs no heap allocation. The
+`artifact stream PATH --buffer-bytes N` command exercises this contract and
+reports its encoded byte and chunk counts.
+
+The admitted content graph has UOR addresses at four levels. A tile address
+binds its codec, element type, encoded length, and encoded-byte digest; a
+tensor address binds its active shape to that tile address; and a layer
+address binds one fixed operation record. The model address binds the ordered
+layer addresses and the sorted mapping from tensor IDs to tensor addresses.
+This makes exact shared tile ranges converge on one tile address while keeping
+their tensor roles explicit in the model. Provenance and container padding are
+deliberately outside the model address; `artifact inspect` reports both this
+semantic model address and the existing SHA-256 identity of the complete
+artifact bytes.
+
+`TileCache` holds encoded tile bytes under those UOR tile addresses. Both its
+entry table and byte storage are supplied by the caller, so capacity is known
+before loading and the cache itself never allocates. Re-inserting the same
+address and bytes is a hit; the same address with different bytes is a typed
+collision error. Exhausting either entries or byte storage is also a typed
+error, and there is no implicit eviction. `artifact cache` exercises this
+contract with explicit `--entries` and `--cache-bytes` bounds.
 
 ## In-process plugin trust
 

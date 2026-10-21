@@ -64,6 +64,20 @@ pub enum ArtifactCommand {
     Validate {
         path: PathBuf,
     },
+    /// Read encoded tensor bytes once through a bounded caller-owned buffer.
+    Stream {
+        path: PathBuf,
+        #[arg(long, default_value_t = 4096, value_name = "BYTES")]
+        buffer_bytes: usize,
+    },
+    /// Load admitted encoded tiles into a bounded content-addressed cache.
+    Cache {
+        path: PathBuf,
+        #[arg(long, default_value_t = 64)]
+        entries: usize,
+        #[arg(long, default_value_t = 1_048_576, value_name = "BYTES")]
+        cache_bytes: usize,
+    },
     CreateFixture {
         path: PathBuf,
     },
@@ -80,4 +94,20 @@ pub struct RunArgs {
     pub artifact: PathBuf,
     #[arg(long)]
     pub input: PathBuf,
+    /// Sustained bandwidth of the tier supplying non-resident bytes.
+    #[arg(long, value_name = "GB/S")]
+    pub transport_bandwidth_gbps: Option<f64>,
+    /// Tier represented by --transport-bandwidth-gbps.
+    #[arg(long, value_enum, default_value_t = TransportTierArg::Memory)]
+    pub transport_tier: TransportTierArg,
+    /// Tokens produced by one execution pass.
+    #[arg(long, default_value_t = 1)]
+    pub tokens_per_pass: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
+pub enum TransportTierArg {
+    #[default]
+    Memory,
+    Storage,
 }
