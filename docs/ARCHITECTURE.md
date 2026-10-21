@@ -26,6 +26,19 @@ kernel table once, and executes bounded operations over caller-owned state.
 - Provenance payloads are canonicalized through `uor-addr` so equivalent JSON
   representations receive the same provenance identity.
 
+Artifacts may also carry a tensor metadata section (kind 3) paired with an
+immutable tile-data section (kind 4). Tensor records are fixed-width 48-byte
+records sorted by tensor ID: ID, element type, codec, rank, four dimensions,
+and the tile range relative to the tile-data section. Version 1 admits only
+raw little-endian `f32` tensors, so every active dimension is nonzero, unused
+dimensions are zero, tile offsets are four-byte aligned, and the byte length
+must equal the shape's element count times four. Admission rejects missing
+section pairs, duplicate or unsorted IDs, unsupported codecs, malformed
+shapes, out-of-range tiles, gaps, unreferenced bytes, and partial overlaps.
+Exact shared ranges are allowed so tied tensors can name the same immutable
+bytes. Validated tensor lookup returns borrowed slices into the mapped
+artifact; it does not copy or decode tile data.
+
 ## Kernel plugin model
 
 The current ABI is version 3. The host resolves only

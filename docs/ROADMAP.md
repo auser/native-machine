@@ -69,7 +69,7 @@
 ## Phase 6 — transport-bound execution
 
 - [x] deterministic bytes-per-pass ceiling from a named bandwidth tier
-- [ ] immutable tensor and encoded-tile artifact sections
+- [x] immutable tensor metadata and encoded-tile artifact sections (raw `f32` codec)
 - [ ] bounded sequential weight stream with typed exhaustion
 - [ ] UOR-addressed model, tensor, layer, and tile identities
 - [ ] bounded content-addressed tile cache
