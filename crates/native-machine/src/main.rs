@@ -11,6 +11,7 @@ mod host;
 mod ir;
 mod ops;
 mod plugin;
+mod stream;
 mod transport;
 
 use clap::{CommandFactory, Parser};
@@ -41,6 +42,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some(Command::Artifact { command }) => match command {
             cli::ArtifactCommand::Inspect { path } => artifact::inspect(Path::new(&path))?,
             cli::ArtifactCommand::Validate { path } => artifact::validate(Path::new(&path))?,
+            cli::ArtifactCommand::Stream { path, buffer_bytes } => {
+                stream_artifact(Path::new(&path), buffer_bytes)?
+            }
             cli::ArtifactCommand::CreateFixture { path } => {
                 artifact::create_fixture(Path::new(&path))?
             }
@@ -137,5 +141,31 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         None => Cli::command().print_help()?,
     }
+    Ok(())
+}
+
+fn stream_artifact(path: &Path, buffer_bytes: usize) -> Result<(), Box<dyn Error>> {
+    let mapped = artifact::MappedArtifact::open(path, u64::MAX)?;
+    let artifact = mapped.view()?;
+    let tensors = artifact
+        .tensors()?
+        .ok_or("artifact has no tensor sections")?;
+    let mut buffer = vec![0_u8; buffer_bytes];
+    let mut stream = stream::TensorStream::new(tensors);
+    let mut chunk_count = 0_u64;
+    loop {
+        match stream.read_next(&mut buffer) {
+            Ok(_) => chunk_count += 1,
+            Err(stream::StreamError::Exhausted) => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    println!(
+        "streamed {} encoded bytes from {} in {} chunk(s) with a {}-byte buffer",
+        stream.bytes_read(),
+        path.display(),
+        chunk_count,
+        buffer_bytes
+    );
     Ok(())
 }

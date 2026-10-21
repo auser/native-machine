@@ -51,6 +51,7 @@ pub struct TensorRecord<'a> {
     pub bytes: &'a [u8],
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct TensorTable<'a> {
     records: &'a [u8],
     tiles: &'a [u8],
@@ -869,6 +870,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, ArtifactError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stream::{StreamError, TensorStream};
 
     fn fixture() -> Vec<u8> {
         let mut bytes = vec![0_u8; HEADER_BYTES + SECTION_BYTES + crate::ops::OPERATION_BYTES];
@@ -1115,5 +1117,44 @@ mod tests {
         )
         .expect_err("unreferenced tile bytes are rejected");
         assert!(matches!(error, ArtifactError::Tensor { index: 1, .. }));
+    }
+
+    #[test]
+    fn tensor_stream_transports_an_exact_shared_range_once() {
+        let mut records = [0_u8; TENSOR_RECORD_BYTES * 2];
+        for (index, id) in [1_u32, 2].into_iter().enumerate() {
+            let start = index * TENSOR_RECORD_BYTES;
+            let record = &mut records[start..start + TENSOR_RECORD_BYTES];
+            record[0..4].copy_from_slice(&id.to_le_bytes());
+            record[4..6].copy_from_slice(&ELEMENT_F32.to_le_bytes());
+            record[6..8].copy_from_slice(&CODEC_RAW.to_le_bytes());
+            record[8..10].copy_from_slice(&1_u16.to_le_bytes());
+            record[16..20].copy_from_slice(&1_u32.to_le_bytes());
+            record[40..48].copy_from_slice(&4_u64.to_le_bytes());
+        }
+        let tile = 7.0_f32.to_le_bytes();
+        let bytes = build_artifact(
+            &[0_u8; crate::ops::OPERATION_BYTES],
+            br#"{"compiler":"test"}"#,
+            &records,
+            &tile,
+        )
+        .expect("shared tile artifact builds");
+        let artifact = Artifact::parse(&bytes).expect("shared tile artifact parses");
+        let tensors = artifact
+            .tensors()
+            .expect("tensor table parses")
+            .expect("tensor table exists");
+        let mut stream = TensorStream::new(tensors);
+        let mut buffer = [0_u8; 4];
+
+        let chunk = stream.read_next(&mut buffer).expect("tile streams");
+        assert_eq!(chunk.tensor_id, 1);
+        assert_eq!(buffer, tile);
+        assert_eq!(stream.bytes_read(), 4);
+        assert!(matches!(
+            stream.read_next(&mut buffer),
+            Err(StreamError::Exhausted)
+        ));
     }
 }

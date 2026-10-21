@@ -136,6 +136,7 @@ Create and validate a local artifact fixture:
 native-machine artifact create-fixture ./fixture.nm
 native-machine artifact validate ./fixture.nm
 native-machine artifact inspect ./fixture.nm
+native-machine artifact stream ./fixture.nm --buffer-bytes 4096
 native-machine run --artifact ./fixture.nm --input ./input.f32le
 ```
 

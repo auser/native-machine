@@ -180,6 +180,15 @@ semantic minimum, while cache-line traffic, page faults, prefetch behavior, and
 sustained bandwidth remain hardware measurements. A result must not be
 reported as achieved throughput without a separate timing measurement.
 
+Admitted tensor tiles can be traversed through a forward-only `TensorStream`.
+The caller supplies a fixed-capacity, `f32`-aligned byte buffer; each read
+returns deterministic tensor and offset metadata, and completion is the typed
+`Exhausted` result. Exact shared ranges used by tied weights are transported
+for their first tensor only, so every physical encoded byte crosses the stream
+once. The steady-state read path performs no heap allocation. The
+`artifact stream PATH --buffer-bytes N` command exercises this contract and
+reports its encoded byte and chunk counts.
+
 ## In-process plugin trust
 
 Plugins are `dlopen`ed shared libraries running in the runtime's address

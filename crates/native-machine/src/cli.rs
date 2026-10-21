@@ -64,6 +64,12 @@ pub enum ArtifactCommand {
     Validate {
         path: PathBuf,
     },
+    /// Read encoded tensor bytes once through a bounded caller-owned buffer.
+    Stream {
+        path: PathBuf,
+        #[arg(long, default_value_t = 4096, value_name = "BYTES")]
+        buffer_bytes: usize,
+    },
     CreateFixture {
         path: PathBuf,
     },
