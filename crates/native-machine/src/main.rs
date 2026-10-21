@@ -11,6 +11,7 @@ mod host;
 mod ir;
 mod ops;
 mod plugin;
+mod transport;
 
 use clap::{CommandFactory, Parser};
 use cli::{Cli, Command};
@@ -62,7 +63,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 println!("compiled plan {} -> {}", source.display(), output.display());
             }
         },
-        Some(Command::Run(cli::RunArgs { artifact, input })) => {
+        Some(Command::Run(cli::RunArgs {
+            artifact,
+            input,
+            transport_bandwidth_gbps,
+            transport_tier,
+            tokens_per_pass,
+        })) => {
             let mapped =
                 artifact::MappedArtifact::open(Path::new(&artifact), config.max_artifact_bytes)?;
             let view = mapped.view()?;
@@ -107,6 +114,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                 trace.bytes_read(),
                 trace.bytes_written()
             );
+            if let Some(bandwidth_gbps) = transport_bandwidth_gbps {
+                let tier = match transport_tier {
+                    cli::TransportTierArg::Memory => transport::TransportTier::Memory,
+                    cli::TransportTierArg::Storage => transport::TransportTier::Storage,
+                };
+                let bound = transport::TransportBound::new(
+                    tier,
+                    bandwidth_gbps * 1_000_000_000.0,
+                    trace.bytes_read(),
+                    tokens_per_pass,
+                )?;
+                println!(
+                    "transport ceiling: {:.3} tokens/s at {} GB/s {} bandwidth, {} logical bytes/pass, {} token(s)/pass",
+                    bound.tokens_per_second_ceiling(),
+                    bandwidth_gbps,
+                    bound.tier,
+                    bound.bytes_per_pass,
+                    bound.tokens_per_pass
+                );
+            }
         }
         None => Cli::command().print_help()?,
     }

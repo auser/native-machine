@@ -159,6 +159,14 @@ the unfused passes). The trace is allocation-free and costs one branch per
 segment when disabled. `native-machine run` prints the trace summary after
 execution.
 
+The same logical byte count can define a transport ceiling. When `run` receives
+`--transport-bandwidth-gbps`, it reports
+`tokens_per_pass * bandwidth / logical_bytes_per_pass` for the named memory or
+storage tier. This is deliberately an upper bound: logical traffic is the
+semantic minimum, while cache-line traffic, page faults, prefetch behavior, and
+sustained bandwidth remain hardware measurements. A result must not be
+reported as achieved throughput without a separate timing measurement.
+
 ## In-process plugin trust
 
 Plugins are `dlopen`ed shared libraries running in the runtime's address

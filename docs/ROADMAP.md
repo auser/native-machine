@@ -65,3 +65,15 @@
 - [x] packed operation emission
 - [x] behavioral certification
 - [x] atomic artifact publication
+
+## Phase 6 — transport-bound execution
+
+- [x] deterministic bytes-per-pass ceiling from a named bandwidth tier
+- [ ] immutable tensor and encoded-tile artifact sections
+- [ ] bounded sequential weight stream with typed exhaustion
+- [ ] UOR-addressed model, tensor, layer, and tile identities
+- [ ] bounded content-addressed tile cache
+- [ ] encoded-tile kernel contract with reference raw codec
+- [ ] separate logical, encoded, cache-hit, and measured physical byte accounting
+- [ ] fixed-capacity key-value cache accounting
+- [ ] end-to-end streamed model benchmark against its measured bandwidth ceiling
